@@ -1,0 +1,8 @@
+# GateIO — UAV GPS-outage bridging
+# Python 3.9+ recommended. PyTorch >= 2.6 requires weights_only=False when loading
+# the provided checkpoints (they bundle numpy arrays alongside the model weights).
+torch>=2.0.0
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pandas>=2.0

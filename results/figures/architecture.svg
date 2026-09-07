@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="300" viewBox="0 0 980 300" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="980" height="300" fill="#ffffff"/>
+  <text x="490" y="34" text-anchor="middle" font-size="19" font-weight="700" fill="#12324a">GateIO architecture</text>
+  <text x="490" y="56" text-anchor="middle" font-size="12.5" fill="#4a6072">186,390 parameters · one token per 10 Hz window · TCN receptive field ≈ 25 s</text>
+
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#8aa0b2"/>
+    </marker>
+  </defs>
+
+  <!-- boxes -->
+  <g font-size="12">
+    <!-- 1 input -->
+    <rect x="14"  y="96" width="118" height="78" rx="9" fill="#eef4fb" stroke="#5b7fa6" stroke-width="1.4"/>
+    <text x="73" y="124" text-anchor="middle" font-weight="700" fill="#12324a">IMU window</text>
+    <text x="73" y="143" text-anchor="middle" fill="#4a6072">200 × 14</text>
+    <text x="73" y="159" text-anchor="middle" fill="#4a6072">accel·gyro·quat</text>
+
+    <!-- 2 window encoder -->
+    <rect x="152" y="96" width="126" height="78" rx="9" fill="#e6f0f9" stroke="#0072B2" stroke-width="1.6"/>
+    <text x="215" y="122" text-anchor="middle" font-weight="700" fill="#0a4a72">Window</text>
+    <text x="215" y="139" text-anchor="middle" font-weight="700" fill="#0a4a72">Encoder</text>
+    <text x="215" y="158" text-anchor="middle" fill="#4a6072">conv 7·5·3 + attn pool</text>
+
+    <!-- 3 PE -->
+    <rect x="298" y="96" width="112" height="78" rx="9" fill="#e6f0f9" stroke="#0072B2" stroke-width="1.6"/>
+    <text x="354" y="128" text-anchor="middle" font-weight="700" fill="#0a4a72">Outage-step</text>
+    <text x="354" y="146" text-anchor="middle" font-weight="700" fill="#0a4a72">PE</text>
+
+    <!-- 4 TCN -->
+    <rect x="430" y="96" width="126" height="78" rx="9" fill="#e6f0f9" stroke="#0072B2" stroke-width="1.6"/>
+    <text x="493" y="122" text-anchor="middle" font-weight="700" fill="#0a4a72">TCN backbone</text>
+    <text x="493" y="140" text-anchor="middle" fill="#4a6072">2 × 5 dilated</text>
+    <text x="493" y="156" text-anchor="middle" fill="#4a6072">causal blocks</text>
+
+    <!-- 5 attn -->
+    <rect x="576" y="96" width="120" height="78" rx="9" fill="#e6f0f9" stroke="#0072B2" stroke-width="1.6"/>
+    <text x="636" y="128" text-anchor="middle" font-weight="700" fill="#0a4a72">ALiBi causal</text>
+    <text x="636" y="146" text-anchor="middle" font-weight="700" fill="#0a4a72">attention</text>
+
+    <!-- 6 head -->
+    <rect x="716" y="86" width="140" height="98" rx="9" fill="#fdeede" stroke="#D55E00" stroke-width="1.6"/>
+    <text x="786" y="110" text-anchor="middle" font-weight="700" fill="#8a3b00">Velocity head</text>
+    <text x="786" y="130" text-anchor="middle" fill="#6b4a2a">aided branch</text>
+    <text x="786" y="147" text-anchor="middle" fill="#6b4a2a">DR branch ⊕ vₚᵣₑᵥ</text>
+    <text x="786" y="168" text-anchor="middle" fill="#6b4a2a">gated by outage flag</text>
+
+    <!-- output -->
+    <rect x="876" y="104" width="92" height="62" rx="9" fill="#eef4fb" stroke="#5b7fa6" stroke-width="1.4"/>
+    <text x="922" y="131" text-anchor="middle" font-weight="700" fill="#12324a">Δv</text>
+    <text x="922" y="150" text-anchor="middle" fill="#4a6072">3-vector</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#8aa0b2" stroke-width="1.8" fill="none">
+    <line x1="132" y1="135" x2="150" y2="135" marker-end="url(#arr)"/>
+    <line x1="278" y1="135" x2="296" y2="135" marker-end="url(#arr)"/>
+    <line x1="410" y1="135" x2="428" y2="135" marker-end="url(#arr)"/>
+    <line x1="556" y1="135" x2="574" y2="135" marker-end="url(#arr)"/>
+    <line x1="696" y1="135" x2="714" y2="135" marker-end="url(#arr)"/>
+    <line x1="856" y1="135" x2="874" y2="135" marker-end="url(#arr)"/>
+  </g>
+
+  <text x="490" y="216" text-anchor="middle" font-size="12.5" fill="#4a6072">
+    The GateIO-LSTM baseline replaces the TCN backbone + ALiBi attention with a 2-layer causal LSTM; everything else is shared.
+  </text>
+  <text x="490" y="252" text-anchor="middle" font-size="12" fill="#6b4a2a" font-style="italic">
+    Training loss adds a yaw-rate–gated velocity-persistence prior L&#8202;&#8202;(cvprior) — see the gate diagram.
+  </text>
+</svg>

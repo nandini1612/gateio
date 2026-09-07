@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="380" viewBox="0 0 900 380" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="900" height="380" fill="#ffffff"/>
+  <text x="450" y="32" text-anchor="middle" font-size="19" font-weight="700" fill="#12324a">The yaw-rate gate</text>
+  <text x="450" y="54" text-anchor="middle" font-size="12.5" fill="#4a6072">During an outage, the constant-velocity prior fires only on straight flight; turns are left to the drift loss.</text>
+
+  <!-- plot frame -->
+  <!-- x: 80..820, y baseline 300 (|w_z|=0) up to 90 -->
+  <!-- threshold 0.10 rad/s at y=210 -->
+  <g>
+    <!-- shaded straight regions (gate ON) -->
+    <rect x="80"  y="90" width="180" height="210" fill="#0072B2" opacity="0.08"/>
+    <rect x="470" y="90" width="350" height="210" fill="#0072B2" opacity="0.08"/>
+    <!-- shaded turn region (gate OFF) -->
+    <rect x="260" y="90" width="210" height="210" fill="#D55E00" opacity="0.10"/>
+
+    <!-- axes -->
+    <line x1="80" y1="300" x2="820" y2="300" stroke="#33475a" stroke-width="1.5"/>
+    <line x1="80" y1="90"  x2="80"  y2="300" stroke="#33475a" stroke-width="1.5"/>
+
+    <!-- threshold line -->
+    <line x1="80" y1="210" x2="820" y2="210" stroke="#33475a" stroke-width="1.4" stroke-dasharray="6 5"/>
+    <text x="826" y="214" font-size="12" fill="#33475a">|ω_z| = 0.10 rad/s</text>
+
+    <!-- gyro curve: low, hump above threshold (turn), low again -->
+    <path d="M80,278 C150,276 200,272 260,262
+             C300,250 320,150 365,128
+             C410,150 440,250 470,266
+             C560,278 700,282 820,282"
+          fill="none" stroke="#111111" stroke-width="2.6"/>
+
+    <!-- y label -->
+    <text x="30" y="200" font-size="12.5" fill="#33475a" transform="rotate(-90 30 200)">yaw rate |ω_z|</text>
+    <text x="450" y="326" text-anchor="middle" font-size="12.5" fill="#33475a">time within outage  →</text>
+  </g>
+
+  <!-- region annotations -->
+  <g font-size="12.5">
+    <text x="170" y="112" text-anchor="middle" font-weight="700" fill="#0a4a72">straight</text>
+    <text x="365" y="112" text-anchor="middle" font-weight="700" fill="#8a3b00">turn</text>
+    <text x="645" y="112" text-anchor="middle" font-weight="700" fill="#0a4a72">straight</text>
+  </g>
+
+  <!-- gate consequence boxes -->
+  <g font-size="12.5">
+    <rect x="150" y="336" width="240" height="34" rx="7" fill="#e6f0f9" stroke="#0072B2" stroke-width="1.4"/>
+    <text x="270" y="358" text-anchor="middle" fill="#0a4a72" font-weight="600">gate ON → penalize Δv ≠ 0 (hold velocity)</text>
+
+    <rect x="470" y="336" width="250" height="34" rx="7" fill="#fdeede" stroke="#D55E00" stroke-width="1.4"/>
+    <text x="595" y="358" text-anchor="middle" fill="#8a3b00" font-weight="600">gate OFF → drift loss L_dr learns the turn</text>
+  </g>
+</svg>
