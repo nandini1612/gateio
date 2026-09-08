@@ -69,6 +69,11 @@ LSTM_HIDDEN: int = 128
 LSTM_LAYERS: int = 2
 LSTM_DROPOUT: float = 0.15
 
+# v2 residual head: floor on the per-axis velocity-increment scale (DV_IQR_TRUE).
+# The vertical increment scale is ~8e-4 m/s; without a floor, dividing by it amplifies
+# vertical residual errors ~1000x. Applied in both the head and the training loss.
+DV_SCALE_FLOOR: float = 0.02
+
 # Receptive field of the TCN backbone, in tokens:
 #   N_TCN_STACKS * n_convs_per_block(=2) * sum(dilations) + 1
 #   = 2 * 2 * (1+2+4+8+16) + 1 ... using the block's 2 causal convs of kernel 3.
@@ -261,7 +266,8 @@ class VelocityHead(nn.Module):
     constant-velocity prior.
     """
 
-    def __init__(self, d_model: int = D_MODEL, dropout: float = DROPOUT) -> None:
+    def __init__(self, d_model: int = D_MODEL, dropout: float = DROPOUT,
+                 persistence_residual: bool = False) -> None:
         super().__init__()
         h = d_model // 2
 
@@ -275,10 +281,45 @@ class VelocityHead(nn.Module):
         self.head_dr = _branch()
         self.v_prev_proj = nn.Linear(3, d_model)
 
+        # ── v2: predict a residual over v_prev (default OFF = original v1 head) ──
+        # When enabled, the dead-reckoning branch outputs
+        #     y_norm = v_prev_norm + (dv_scale / y_iqr) * r
+        # so r is a unit-scale velocity *increment* and r = 0 reproduces persistence
+        # (holding the last GPS velocity). y_med / y_iqr are the absolute-velocity
+        # normalisation stats; dv_scale is the natural per-axis increment scale
+        # (DV_IQR_TRUE). Set them with set_normalization() before training/inference.
+        # persistent=False: these normalisation constants stay out of the state_dict,
+        # so v1 checkpoints (which lack them) still load, and v2 restores them from the
+        # checkpoint's top-level DV_* fields via set_normalization().
+        self.persistence_residual = persistence_residual
+        self.register_buffer("y_med", torch.zeros(3), persistent=False)
+        self.register_buffer("y_iqr", torch.ones(3), persistent=False)
+        self.register_buffer("dv_scale", torch.ones(3), persistent=False)
+
+    def set_normalization(self, y_med, y_iqr, dv_scale) -> None:
+        """Load the velocity normalisation stats used by the residual parametrisation.
+
+        ``dv_scale`` is floored at DV_SCALE_FLOOR so a pathologically small per-axis
+        increment scale (the vertical axis is ~8e-4 m/s) cannot blow up the residual.
+        The same floor is applied in the loss, so training and inference agree.
+        """
+        self.y_med = torch.as_tensor(y_med, dtype=torch.float32, device=self.y_med.device)
+        self.y_iqr = torch.as_tensor(y_iqr, dtype=torch.float32, device=self.y_iqr.device)
+        self.dv_scale = torch.as_tensor(dv_scale, dtype=torch.float32,
+                                        device=self.dv_scale.device).clamp_min(DV_SCALE_FLOOR)
+
     def forward(self, tokens: torch.Tensor, outage_flag: torch.Tensor, v_prev: torch.Tensor) -> torch.Tensor:
         alpha = outage_flag.unsqueeze(-1)                 # (B, S, 1)
-        return (1.0 - alpha) * self.head_aided(tokens) \
-            + alpha * self.head_dr(tokens + alpha * self.v_prev_proj(v_prev))
+        aided = self.head_aided(tokens)
+        dr_raw = self.head_dr(tokens + alpha * self.v_prev_proj(v_prev))
+        if self.persistence_residual:
+            # v_prev is physical (m/s); express the DR output as an absolute-velocity
+            # prediction built as persistence + a scaled increment.
+            v_prev_norm = (v_prev - self.y_med) / self.y_iqr
+            dr = v_prev_norm + (self.dv_scale / self.y_iqr) * dr_raw
+        else:
+            dr = dr_raw
+        return (1.0 - alpha) * aided + alpha * dr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,13 +368,17 @@ class GateIO(nn.Module):
                     (Y_iqr) space; denormalise with y * Y_iqr + Y_median.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, persistence_residual: bool = False) -> None:
         super().__init__()
         self.window_enc = WindowEncoder(N_CHAN, D_MODEL)
         self.pos_enc = OutageStepPE(D_MODEL)
         self.tcn = TCNBackbone(D_MODEL, N_TCN_STACKS)
         self.attn = ALiBiCausalAttention(D_MODEL, N_HEADS, DROPOUT)
-        self.head = VelocityHead(D_MODEL, DROPOUT)
+        self.head = VelocityHead(D_MODEL, DROPOUT, persistence_residual=persistence_residual)
+
+    def set_normalization(self, y_med, y_iqr, dv_scale) -> None:
+        """Forward velocity normalisation stats to the residual head (v2 only)."""
+        self.head.set_normalization(y_med, y_iqr, dv_scale)
 
     def forward(self, x: torch.Tensor, outage_flag: torch.Tensor, v_prev: torch.Tensor) -> torch.Tensor:
         B, S, W, C = x.shape
@@ -351,12 +396,16 @@ class GateIOLSTM(nn.Module):
     and VelocityHead verbatim; swaps TCN+attention for :class:`LSTMBackbone`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, persistence_residual: bool = False) -> None:
         super().__init__()
         self.window_enc = WindowEncoder(N_CHAN, D_MODEL)
         self.pos_enc = OutageStepPE(D_MODEL)
         self.backbone = LSTMBackbone()
-        self.head = VelocityHead(D_MODEL, DROPOUT)
+        self.head = VelocityHead(D_MODEL, DROPOUT, persistence_residual=persistence_residual)
+
+    def set_normalization(self, y_med, y_iqr, dv_scale) -> None:
+        """Forward velocity normalisation stats to the residual head (v2 only)."""
+        self.head.set_normalization(y_med, y_iqr, dv_scale)
 
     def forward(self, x: torch.Tensor, outage_flag: torch.Tensor, v_prev: torch.Tensor) -> torch.Tensor:
         B, S, W, C = x.shape
@@ -390,4 +439,23 @@ if __name__ == "__main__":
         assert y.shape == (B, S, 3), f"{name}: bad output shape {tuple(y.shape)}"
         tag = f"  (paper: {expected:,})" if expected else ""
         print(f"{name:<11} params={n_params:>8,}{tag}  output={tuple(y.shape)}  OK")
+
+    # v2 residual head: same parameter count, and a zeroed DR branch must reproduce
+    # persistence exactly (output_norm == v_prev_norm) on outage windows.
+    y_med = torch.tensor([-0.146, 0.820, 0.003])
+    y_iqr = torch.tensor([1.516, 7.985, 0.100])
+    dv_scale = torch.tensor([0.055, 0.319, 0.00078])
+    m2 = GateIO(persistence_residual=True).eval()
+    m2.set_normalization(y_med, y_iqr, dv_scale)
+    assert sum(p.numel() for p in m2.parameters()) == 186_390, "v2 changed param count"
+    # zero the DR branch's final layer so dr_raw == 0 -> output must equal persistence
+    with torch.no_grad():
+        m2.head.head_dr[-1].weight.zero_(); m2.head.head_dr[-1].bias.zero_()
+        vprev_phys = torch.randn(B, S, 3)
+        full_outage = torch.ones(B, S)
+        out = m2(x, full_outage, vprev_phys)
+        vprev_norm = (vprev_phys - y_med) / y_iqr
+    err = (out - vprev_norm).abs().max().item()
+    assert err < 1e-5, f"residual default != persistence (max err {err})"
+    print(f"GateIO v2   params= 186,390  residual default == persistence (max err {err:.1e})  OK")
     print("Self-test passed.")

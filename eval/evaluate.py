@@ -120,6 +120,54 @@ def predict_sequence(model, x_norm_seq, y_raw_seq, outage_start, outage_end,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Persistence-substitution diagnostic (measures the v2 fix's ceiling, no retrain)
+# ─────────────────────────────────────────────────────────────────────────────
+@torch.no_grad()
+def persistence_check(model, X, Y, idx, dv_iqr, dv_median, Xmed, Xiq, device,
+                      gate_thr=0.10, groups=("straight-short",)):
+    """For each sequence, re-integrate the outage with the model's velocity replaced by
+    ``v_prev`` on gated straight windows (|gyro_z| < gate_thr). This is what a model that
+    correctly deferred to persistence would achieve — the ceiling the residual (v2) head
+    reaches for. Reports, per group, normal vs persistence-substituted vs const-v drift.
+    """
+    mid = WIN_LEN // 2
+    rows = {g: [] for g in groups}
+    for si in range(len(idx)):
+        g = GROUP_MAP.get(si)
+        if g not in rows:
+            continue
+        st = int(idx[si]); xrs = X[st:st + SEQ_LEN]; yrs = Y[st:st + SEQ_LEN]
+        if len(xrs) < SEQ_LEN:
+            continue
+        xns = (xrs - Xmed) / np.where(Xiq < 1e-6, 1.0, Xiq)
+        os_ = SEQ_LEN // 3; oe_ = min(os_ + OE_LEN, SEQ_LEN)
+        r = predict_sequence(model, xns, yrs, os_, oe_, dv_iqr, dv_median, device)
+        pm = r["dv_pred_ms"].copy()                       # (S,3) physical model velocity
+        gyro = np.abs(xrs[:, mid, 5])                      # raw yaw rate
+        vprev = yrs[os_ - 1] if os_ > 0 else yrs[0]
+        for t in range(os_, oe_):
+            if gyro[t] < gate_thr:
+                pm[t, :2] = vprev[:2]                      # substitute persistence
+        pp = np.zeros((SEQ_LEN, 2)); pt = np.zeros((SEQ_LEN, 2))
+        for t in range(os_ + 1, SEQ_LEN):
+            pp[t] = pp[t - 1] + pm[t, :2] * DT
+            pt[t] = pt[t - 1] + yrs[t, :2] * DT
+        sub_drift = float(np.linalg.norm(pp[oe_ - 1] - pt[oe_ - 1]))
+        naive = ekf.run_naive_sequence(si, Y, idx, dv_iqr, dv_median)
+        rows[g].append((r["drift_m"], sub_drift, naive))
+
+    print(f"\n{'='*66}\n  PERSISTENCE-SUBSTITUTION CHECK (gate |gyro_z| < {gate_thr})\n{'='*66}")
+    print(f"  {'Group':<16}{'GateIO':>10}{'persist-sub':>13}{'Const-v':>10}{'N':>5}")
+    for g in groups:
+        a = np.array(rows[g])
+        if not len(a):
+            continue
+        print(f"  {g:<16}{a[:,0].mean():>9.2f}m{a[:,1].mean():>12.2f}m{a[:,2].mean():>9.2f}m{len(a):>5}")
+    print("  persist-sub ≈ Const-v  =>  deferring to v_prev on straight windows recovers"
+          "\n  the loss; that is the gap the v2 residual head is designed to close.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Checkpoint loading
 # ─────────────────────────────────────────────────────────────────────────────
 def load_model(ckpt_path: str, kind: str, device):
@@ -129,10 +177,20 @@ def load_model(ckpt_path: str, kind: str, device):
     (DV_iqr etc.) alongside the model weights, which PyTorch >= 2.6 refuses to
     unpickle under the default weights_only=True.
     """
-    model = (GateIO() if kind == "gateio" else GateIOLSTM()).to(device)
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
+    residual = bool(ck.get("residual", False)) if isinstance(ck, dict) else False
+    ctor = GateIO if kind == "gateio" else GateIOLSTM
+    model = ctor(persistence_residual=residual).to(device)
     state = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
+    # Drop the residual head's non-persistent normalisation buffers if an older
+    # checkpoint stored them; they are restored below via set_normalization.
+    state = {k: v for k, v in state.items()
+             if k not in ("head.y_med", "head.y_iqr", "head.dv_scale")}
     model.load_state_dict(state)
+    if residual:
+        # The residual head needs the velocity normalisation stats it was trained with.
+        model.set_normalization(ck["DV_median"], ck["DV_iqr"], ck["DV_IQR_TRUE"])
+        print(f"  loaded v2 (residual) checkpoint: {os.path.basename(ckpt_path)}")
     model.eval()
     return model
 
@@ -218,6 +276,9 @@ def main() -> None:
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--tune-ekf", action="store_true",
                     help="Re-tune the EKF on the val set instead of using locked params.")
+    ap.add_argument("--persistence-check", action="store_true",
+                    help="Also run the persistence-substitution diagnostic on straight groups "
+                         "(replaces the model with v_prev on gated straight windows).")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -247,6 +308,10 @@ def main() -> None:
 
     run_all_models(model_gateio, model_lstm, X, Y, idx, dv_iqr, dv_median,
                    Xmed, Xiq, ekf_params, device, args.split.upper(), args.out_dir)
+
+    if args.persistence_check:
+        persistence_check(model_gateio, X, Y, idx, dv_iqr, dv_median, Xmed, Xiq, device,
+                          groups=("straight-short", "straight-med", "FALSE-ALARM"))
 
 
 if __name__ == "__main__":

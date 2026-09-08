@@ -47,7 +47,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from models.gateio import (  # noqa: E402
-    GateIO, GateIOLSTM, N_IMU_CHAN, SEQ_LEN, WIN_LEN, DT,
+    GateIO, GateIOLSTM, N_IMU_CHAN, SEQ_LEN, WIN_LEN, DT, DV_SCALE_FLOOR,
 )
 from data.data_loader import MARSDataset  # noqa: E402
 
@@ -111,7 +111,8 @@ def compute_v_prev(y_norm: torch.Tensor, outage_mask: torch.Tensor,
 # Combined loss (R20 "v10", gated L_cvprior)
 # ─────────────────────────────────────────────────────────────────────────────
 def combined_loss(dv_pred_norm, dv_true_norm, outage_mask, dv_iqr_t, dv_median_t,
-                  v_prev=None, x_raw=None, lam_p=0.0, lam_d=0.0, cap_m=100.0):
+                  v_prev=None, x_raw=None, lam_p=0.0, lam_d=0.0, cap_m=100.0,
+                  residual_mode=False, dv_scale_t=None):
     """Total training loss and a dict of its components.
 
     Terms:
@@ -137,8 +138,24 @@ def combined_loss(dv_pred_norm, dv_true_norm, outage_mask, dv_iqr_t, dv_median_t
                            delta=HUBER_DELTA, reduction="mean")
               if aid_mask.any() else torch.tensor(0.0, device=device))
 
-    # L_dr — all outage windows, axis-weighted
-    L_dr = (F.huber_loss(dv_pred_norm[out_mask] * aw, dv_true_norm[out_mask] * aw,
+    # ── v2 residual mode: express L_dr / L_cvprior as the velocity *increment*
+    # over v_prev, normalised by the true increment scale (DV_IQR_TRUE). This
+    # un-compresses the wide-IQR forward axis and makes "hold velocity" (increment
+    # = 0) the target of the prior — instead of "predict the training median".
+    # dv_pred here equals the residual head's raw output r when the two are paired.
+    if residual_mode:
+        assert dv_scale_t is not None and v_prev is not None, "residual_mode needs dv_scale_t and v_prev"
+        dvs = dv_scale_t.to(device)
+        v_pred_phys = dv_pred_norm * iqr + med
+        v_true_phys = dv_true_norm * iqr + med
+        inc_pred = (v_pred_phys - v_prev) / dvs          # predicted increment (unit-scale)
+        inc_true = (v_true_phys - v_prev) / dvs          # true increment (unit-scale)
+    else:
+        inc_pred = dv_pred_norm
+        inc_true = dv_true_norm
+
+    # L_dr — all outage windows, axis-weighted (on the increment in v2)
+    L_dr = (F.huber_loss(inc_pred[out_mask] * aw, inc_true[out_mask] * aw,
                          delta=HUBER_DELTA, reduction="mean")
             if out_mask.any() else torch.tensor(0.0, device=device))
 
@@ -150,10 +167,12 @@ def combined_loss(dv_pred_norm, dv_true_norm, outage_mask, dv_iqr_t, dv_median_t
         straight_out = (gyro_z < CVPRIOR_GYRO_THR) & out_mask
         n_straight_out = int(straight_out.sum().item())
         if straight_out.any():
-            # Target zero: in Δv space, straight cruise means no velocity change,
-            # which generalises across all flight speeds.
-            zero_target = torch.zeros_like(dv_pred_norm[straight_out][:, :2])
-            L_cvprior = F.huber_loss(dv_pred_norm[straight_out][:, :2], zero_target,
+            # Push the velocity increment toward zero on straight windows.
+            # v1: increment == normalised absolute velocity, so "→0" pulls toward the
+            #     training median (the bug). v2: increment is (v_pred - v_prev)/DV_scale,
+            #     so "→0" means genuinely hold the last known velocity.
+            zero_target = torch.zeros_like(inc_pred[straight_out][:, :2])
+            L_cvprior = F.huber_loss(inc_pred[straight_out][:, :2], zero_target,
                                      delta=HUBER_DELTA, reduction="mean")
 
     # L_smooth — jerk penalty
@@ -218,7 +237,7 @@ def build_model_input(xn, om, vp, temporal_dropout: bool, device):
 
 
 def train_one_epoch(model, loader, optimizer, scheduler, dv_iqr_t, dv_median_t,
-                    device, lam_p=0.0, lam_d=0.0):
+                    device, lam_p=0.0, lam_d=0.0, residual_mode=False, dv_scale_t=None):
     model.train()
     totals = defaultdict(float)
     n = 0
@@ -233,7 +252,8 @@ def train_one_epoch(model, loader, optimizer, scheduler, dv_iqr_t, dv_median_t,
         optimizer.zero_grad()
         dv_pred = model(xf, flag, vp)
         loss, comps = combined_loss(dv_pred, yn, om, dv_iqr_t, dv_median_t,
-                                    v_prev=vp, x_raw=xr, lam_p=lam_p, lam_d=lam_d)
+                                    v_prev=vp, x_raw=xr, lam_p=lam_p, lam_d=lam_d,
+                                    residual_mode=residual_mode, dv_scale_t=dv_scale_t)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -303,6 +323,10 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--v2", action="store_true",
+                    help="Enable the residual/persistence parametrisation (v2 fix): the "
+                         "DR head predicts a velocity increment over v_prev and the prior "
+                         "is scaled by DV_IQR_TRUE. Default off = original v1 (reproduces the paper).")
     args = ap.parse_args()
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
@@ -330,7 +354,14 @@ def main() -> None:
     n_batches = math.ceil(n_seqs / args.batch_size)
     print(f"Train seqs: {n_seqs}  Val seqs: {len(val_ds)}  Batches/epoch: {n_batches}")
 
-    model = (GateIO() if args.model == "gateio" else GateIOLSTM()).to(device)
+    ctor = GateIO if args.model == "gateio" else GateIOLSTM
+    model = ctor(persistence_residual=args.v2).to(device)
+    dv_scale_t = (torch.from_numpy(DV_IQR_TRUE).to(device).clamp_min(DV_SCALE_FLOOR)
+                  if args.v2 else None)
+    if args.v2:
+        model.set_normalization(dv_median, dv_iqr, DV_IQR_TRUE)  # floors internally
+        print(f"v2 residual head ON  |  DV_scale (floored at {DV_SCALE_FLOOR}) = "
+              f"{dv_scale_t.cpu().numpy()}")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters: {n_params:,}")
 
@@ -339,8 +370,9 @@ def main() -> None:
         optimizer, max_lr=args.lr, total_steps=args.epochs * n_batches,
         pct_start=0.05, anneal_strategy="cos", div_factor=25, final_div_factor=100)
 
-    ckpt_best = os.path.join(args.ckpt_dir, f"{args.model}_best.pt")
-    ckpt_last = os.path.join(args.ckpt_dir, f"{args.model}_last.pt")
+    tag = "_v2" if args.v2 else ""
+    ckpt_best = os.path.join(args.ckpt_dir, f"{args.model}{tag}_best.pt")
+    ckpt_last = os.path.join(args.ckpt_dir, f"{args.model}{tag}_last.pt")
 
     history = defaultdict(list)
     best_drift = float("inf")
@@ -356,7 +388,8 @@ def main() -> None:
                     / max(1, DRIFT_WARM_END - DRIFT_WARM_START))
 
         tc = train_one_epoch(model, train_loader, optimizer, scheduler,
-                             dv_iqr_t, dv_med_t, device, lam_p, lam_d)
+                             dv_iqr_t, dv_med_t, device, lam_p, lam_d,
+                             residual_mode=args.v2, dv_scale_t=dv_scale_t)
         vd = eval_val_drift(model, val_loader, dv_iqr_t, dv_med_t, device)
 
         history["train_loss"].append(tc["total"])
@@ -372,7 +405,8 @@ def main() -> None:
                         "history": dict(history), "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict(),
                         "DV_iqr": dv_iqr, "DV_median": dv_median,
-                        "DV_IQR_TRUE": DV_IQR_TRUE, "run": args.model}, ckpt_best)
+                        "DV_IQR_TRUE": DV_IQR_TRUE, "run": args.model,
+                        "residual": args.v2}, ckpt_best)
             status = f"* BEST {best_drift:.2f}m"
         else:
             patience_ctr += 1
@@ -382,7 +416,8 @@ def main() -> None:
                     "history": dict(history), "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(), "patience_ctr": patience_ctr,
                     "DV_iqr": dv_iqr, "DV_median": dv_median,
-                    "DV_IQR_TRUE": DV_IQR_TRUE, "run": args.model}, ckpt_last)
+                    "DV_IQR_TRUE": DV_IQR_TRUE, "run": args.model,
+                    "residual": args.v2}, ckpt_last)
 
         if epoch == 1 or epoch % 5 == 0 or is_best:
             print(f"{epoch:>4} {tc['total']:>9.4f} {vd:>7.2f}m {tc.get('L_cvprior', 0.):>7.4f} "
