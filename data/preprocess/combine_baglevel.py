@@ -69,7 +69,14 @@ def flight_path(processed_dir: str, name: str) -> str:
 
 
 def load_flight(processed_dir: str, name: str):
-    d = np.load(flight_path(processed_dir, name), allow_pickle=True)
+    p = flight_path(processed_dir, name)
+    if not os.path.exists(p):
+        raise FileNotFoundError(
+            f"Per-flight file not found: {p}\n"
+            f"combine_baglevel needs transformer_ds_<flight>.npz for all 5 flights in "
+            f"--processed-dir. Point --processed-dir at the folder that holds them, or "
+            f"upload them there.")
+    d = np.load(p, allow_pickle=True)
     return d["X_train"].astype(np.float32), d["y_train"].astype(np.float32)
 
 
@@ -130,6 +137,7 @@ def build(processed_dir, train, val, test, out):
     val_valid_idx = valid_indices([len(Xv)], [val], SEQ_LEN, VAL_TEST_STRIDE)
     test_valid_idx = valid_indices([len(Xt)], [test], SEQ_LEN, VAL_TEST_STRIDE)
 
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     np.savez_compressed(
         out,
         X_train=X_train, Y_train=Y_train, W_train=W_train,
