@@ -355,6 +355,10 @@ def main() -> None:
     dv_median = npz["Y_median"].astype(np.float32)
     dv_iqr_t = torch.from_numpy(dv_iqr).to(device)
     dv_med_t = torch.from_numpy(dv_median).to(device)
+    # Per-fold velocity-increment scale for the v2 residual head; the bag-level
+    # combine ships DV_IQR_TRUE in the npz, otherwise fall back to the module constant.
+    dv_iqr_true = (npz["DV_IQR_TRUE"].astype(np.float32)
+                   if "DV_IQR_TRUE" in npz.files else DV_IQR_TRUE)
 
     train_ds = MARSDataset(args.data, split="train", outage_prob=0.8)
     val_ds = MARSDataset(args.data, split="val", outage_prob=0.0)
@@ -370,10 +374,10 @@ def main() -> None:
 
     ctor = GateIO if args.model == "gateio" else GateIOLSTM
     model = ctor(persistence_residual=args.v2).to(device)
-    dv_scale_t = (torch.from_numpy(DV_IQR_TRUE).to(device).clamp_min(DV_SCALE_FLOOR)
+    dv_scale_t = (torch.from_numpy(dv_iqr_true).to(device).clamp_min(DV_SCALE_FLOOR)
                   if args.v2 else None)
     if args.v2:
-        model.set_normalization(dv_median, dv_iqr, DV_IQR_TRUE)  # floors internally
+        model.set_normalization(dv_median, dv_iqr, dv_iqr_true)  # floors internally
         print(f"v2 residual head ON  |  DV_scale (floored at {DV_SCALE_FLOOR}) = "
               f"{dv_scale_t.cpu().numpy()}")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -419,7 +423,7 @@ def main() -> None:
                         "history": dict(history), "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict(),
                         "DV_iqr": dv_iqr, "DV_median": dv_median,
-                        "DV_IQR_TRUE": DV_IQR_TRUE, "run": args.model,
+                        "DV_IQR_TRUE": dv_iqr_true, "run": args.model,
                         "residual": args.v2}, ckpt_best)
             status = f"* BEST {best_drift:.2f}m"
         else:
@@ -430,7 +434,7 @@ def main() -> None:
                     "history": dict(history), "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(), "patience_ctr": patience_ctr,
                     "DV_iqr": dv_iqr, "DV_median": dv_median,
-                    "DV_IQR_TRUE": DV_IQR_TRUE, "run": args.model,
+                    "DV_IQR_TRUE": dv_iqr_true, "run": args.model,
                     "residual": args.v2}, ckpt_last)
 
         if epoch == 1 or epoch % 5 == 0 or is_best:
