@@ -327,11 +327,25 @@ def main() -> None:
                     help="Enable the residual/persistence parametrisation (v2 fix): the "
                          "DR head predicts a velocity increment over v_prev and the prior "
                          "is scaled by DV_IQR_TRUE. Default off = original v1 (reproduces the paper).")
+    ap.add_argument("--lam-cvprior", type=float, default=None,
+                    help="Override LAM_CVPRIOR (persistence prior weight). Raise it in v2 to "
+                         "hold persistence on straight/long groups; turns are gated off so are unaffected.")
+    ap.add_argument("--lam-drift", type=float, default=None,
+                    help="Override LAM_DRIFT (cumulative-position-error weight).")
     args = ap.parse_args()
+
+    # Optional loss-weight overrides (v2 tuning). Reassigning the module globals is
+    # sufficient because combined_loss reads them at call time from this module.
+    global LAM_CVPRIOR, LAM_DRIFT
+    if args.lam_cvprior is not None:
+        LAM_CVPRIOR = args.lam_cvprior
+    if args.lam_drift is not None:
+        LAM_DRIFT = args.lam_drift
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}  |  model: {args.model}")
+    print(f"Device: {device}  |  model: {args.model}  |  "
+          f"LAM_CVPRIOR={LAM_CVPRIOR}  LAM_DRIFT={LAM_DRIFT}")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
