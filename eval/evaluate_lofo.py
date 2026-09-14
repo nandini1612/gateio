@@ -104,12 +104,15 @@ def main():
     ap.add_argument("--ckpt-dir", required=True,
                     help="Dir with fold0/gateio_v2_best.pt .. fold4/gateio_v2_best.pt")
     ap.add_argument("--no-tune-ekf", action="store_true", help="Use locked EKF params.")
+    ap.add_argument("--out", default=None,
+                    help="Optional CSV path for per-sequence results (fold, flight, group, drifts).")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     pooled = []
+    csv_rows = []
     print("=" * 62)
     for k in range(N_FOLDS):
         fold_npz = os.path.join(args.folds_dir, f"fold{k}.npz")
@@ -120,10 +123,21 @@ def main():
         flight, rows = eval_fold(fold_npz, ckpt, device, tune_ekf=not args.no_tune_ekf)
         summarize(f"fold {k}: test={flight}", rows)
         pooled.extend(rows)
+        for grp, g, e, n in rows:
+            csv_rows.append((k, flight, grp, g, e, n))
 
     print("\n" + "=" * 62)
     summarize("LOFO POOLED (all held-out flights)", pooled)
     print("=" * 62)
+
+    if args.out:
+        import csv as _csv
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["fold", "test_flight", "group", "gateio_m", "ekf_m", "constv_m"])
+            w.writerows(csv_rows)
+        print(f"Saved per-sequence results -> {args.out}")
 
 
 if __name__ == "__main__":
