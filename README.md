@@ -2,21 +2,68 @@
 
 GateIO predicts GPS velocity from inertial data during a GPS outage and integrates
 those predictions to estimate position. Its distinguishing component is a
-**yaw-rate-gated velocity-persistence prior**: during straight flight the model is
-penalized for predicting velocity *changes* (a constant-velocity prior), and the
-gate switches off during turns so the drift loss — and only the drift loss — teaches
-turning dynamics.
+**yaw-rate-gated velocity-persistence prior**: while the aircraft flies straight the
+model is held close to the last known velocity, and the gate switches off during turns
+so the drift loss teaches turning dynamics. The output head predicts a *change* in
+velocity over the last known value, so its default is to hold velocity.
 
-**What the results support (read this first).** On sequences drawn from the same
-flights as training (validation), GateIO bridges a 10 s outage with **6.72 m mean
-drift** and keeps **76% of outages under 5 m**. On a **sealed test set of held-out
-flight segments**, this does *not* transfer: GateIO's error on straight motion rises
-to ~30 m, and a naive constant-velocity baseline is more accurate on the typical case
-(2.06 m median vs 28.24 m). GateIO's robust, split-independent contribution is that
-it — like the LSTM, and unlike the EKF and constant-velocity baselines — **avoids the
-catastrophic dead-reckoning blow-up that occurs during turns** (up to ~600 m for the
-classical baselines). Treat GateIO as evidence for that specific claim, not as a
-general-purpose outage-bridging solution. See [Limitations](#limitations).
+**Result, stated honestly.** Under **leave-one-flight-out cross-validation** across all
+five flights (no data leakage; model selection on a held-out validation flight), GateIO
+reaches **23.4 m mean endpoint drift** over a 10 s outage, pooled over 1,390 held-out
+sequences — **3.6× better** than a tuned EKF (99.5 m) and a constant-velocity baseline
+(85.0 m), and **9× better on turns**. A common within-flight split inflates this to
+about 7 m; we report the leakage-free number as the honest measure. Cross-flight
+bridging on this five-flight dataset is improved by learning, but it is not solved
+(42% of outages stay under 5 m). See [Limitations](#limitations).
+
+---
+
+## Results
+
+Endpoint drift in metres after a 10 s outage. `Const-v` holds the last known GPS
+velocity through the outage. Lower is better.
+
+### Leave-one-flight-out cross-validation — headline, no leakage
+
+Pooled over all five held-out flights (1,390 sequences). A sequence is *Turn* if its
+mean yaw rate during the outage exceeds 0.10 rad/s, else *Straight*.
+
+| Group | GateIO | EKF | Const-v | GateIO % < 5 m |
+|---|---:|---:|---:|---:|
+| Straight (1200) | **20.8** | 55.9 | 41.4 | 48% |
+| Turn (190) | **40.0** | 374.8 | 360.6 | 6% |
+| **All (1390)** | **23.4** | 99.5 | 85.0 | 42% |
+
+Per test flight (all sequences): gnss01 27.3, gnss02 13.1, gnss03 17.6,
+island_gnss02 23.9, island_gnss03 35.0.
+
+![Leave-one-flight-out result](results/figures/fig_lofo.png)
+
+GateIO beats both classical baselines on every group. The gain is largest on turns,
+where constant-velocity and EKF diverge. On straight flight GateIO is roughly twice as
+accurate as holding velocity — because even low-yaw flight has real speed changes across
+flights, which a learned model captures and pure persistence does not. Reproduce with
+`eval/evaluate_lofo.py`; see [`results/lofo_summary.csv`](results/lofo_summary.csv).
+
+### Within-flight split — shown for contrast (inflated by leakage)
+
+The numbers below use a within-flight 80/10/10 split, where validation and test windows
+sit next to training windows from the *same* flight. They are **not** the headline: the
+split leaks, so it overstates accuracy roughly 3× (6.72 m here vs 23.4 m under
+leave-one-flight-out). We keep them to show the size of the effect.
+
+| Metric | Split | GateIO | LSTM | EKF | Const-v |
+|---|---|---:|---:|---:|---:|
+| Mean (m) | val | 6.72 | 7.78 | 74.80 | 30.64 |
+|          | test | 34.11 | 42.50 | 58.16 | 62.97 |
+| % under 5 m | val | 76.3% | 79.7% | 13.6% | 74.6% |
+|             | test | 0.0% | 0.0% | 11.9% | 84.7% |
+
+The within-flight *validation* number (6.72 m) looks strong; the sealed within-flight
+*test* number (34 m) already hints at the problem, and leave-one-flight-out confirms it.
+Full per-group tables and figures: [`results/val_all_results.csv`](results/val_all_results.csv),
+[`results/test_all_results.csv`](results/test_all_results.csv),
+`results/figures/fig2_group_bars.png`, `results/figures/fig3_drift_cdf.png`.
 
 ---
 
@@ -30,86 +77,64 @@ known GPS velocity during outages.
 ![GateIO architecture](results/figures/architecture.svg)
 
 The recurrent baseline, **GateIO-LSTM**, is identical except that the TCN + attention
-backbone is replaced by a 2-layer causal LSTM — isolating the contribution of the
-convolutional/attention backbone.
+backbone is replaced by a 2-layer causal LSTM.
 
 ### The yaw-rate gate
 
-The training loss combines a GPS-aided term, an outage dead-reckoning term (`L_dr`),
-and the gated constant-velocity prior (`L_cvprior`). On outage windows with
-`|ω_z| < 0.10 rad/s` (straight cruise) the prior pushes the predicted velocity change
-toward zero; above the threshold (turns) the gate is off and `L_dr` alone shapes the
-prediction. An earlier *ungated* prior competed with `L_dr` on turns and was
-overwhelmed — gating is what makes the prior safe to weight heavily.
+On outage windows with `|ω_z| < 0.10 rad/s` (straight cruise) a prior pushes the
+predicted velocity *change* toward zero — hold the last known velocity. Above the
+threshold (turns) the gate is off and the drift loss shapes the prediction. An earlier
+ungated version of this prior fought the drift loss on turns and lost; gating is what
+lets it carry weight.
 
-![The yaw-rate gate](results/figures/gate.svg)
+### Residual output (v2)
+
+The dead-reckoning head predicts the change in velocity over the last known value,
+scaled by the natural size of that change. A zero output is exactly "hold velocity", so
+on an unseen flight the model degrades to persistence instead of to a biased guess. This
+is enabled with `--v2` in training and is the change that makes GateIO generalize across
+flights. The original absolute-velocity head is kept for reference (default, reproduces
+the within-flight numbers).
 
 | Loss term | Where it applies | Weight |
 |---|---|---|
 | `L_data` — Huber on GPS velocity | GPS-aided windows | 1.0 |
-| `L_dr` — Huber, vertical-axis-weighted | all outage windows | 0.90 |
-| `L_cvprior` — push Δv→0 | outage windows with `|ω_z|<0.10 rad/s` | 0.50 |
+| `L_dr` — Huber on the velocity increment | all outage windows | 0.90 |
+| `L_cvprior` — push the increment → 0 (hold velocity) | outage windows with `|ω_z|<0.10 rad/s` | 0.50 |
 | `L_smooth` — jerk penalty | whole sequence | 0.001 |
-| `L_phys` (ZUPT), `L_drift` (position) | warmed in after epoch 30 | ≤0.01 / 0.002 |
+| `L_drift` — cumulative position error | outage, warmed in after epoch 30 | 0.002 |
 
 GateIO has **186,390 parameters**; the TCN receptive field spans ≈ 25 s of context.
 
 ---
 
-## Results
+## Evaluation protocol
 
-Endpoint drift in metres after a 10 s outage, 59 sequences per split. **Bold** = best
-in row. `Const-v` holds the last known GPS velocity through the outage.
+**Task.** During a simulated GPS outage the model predicts GPS velocity from IMU data
+and the last known GPS-aided velocity. Velocity is integrated to a position estimate and
+scored by horizontal endpoint drift.
 
-### Per-group mean drift (m)
+**Windowing.** Each input window is 200 IMU samples (1.0 s at 200 Hz), encoded to one
+token; predictions are made at 10 Hz. A sequence is 300 windows (30 s).
 
-| Group (N) | Split | GateIO | LSTM | EKF | Const-v |
-|---|---|---:|---:|---:|---:|
-| straight-short (35) | val | **0.63** | 0.64 | 9.51 | 2.11 |
-|                     | test | 30.39 | 35.26 | 11.24 | **2.08** |
-| straight-med (6)    | val | 3.04 | 3.18 | 8.66 | **1.31** |
-|                     | test | 17.48 | 28.83 | 10.72 | **2.17** |
-| TURN (6)            | val | 4.73 | **2.90** | 351.64 | 135.79 |
-|                     | test | 83.73 | **68.48** | 408.56 | 598.18 |
-| FALSE-ALARM (6)     | val | 28.08 | 39.62 | 26.62 | **4.68** |
-|                     | test | 16.28 | 44.33 | 11.56 | **1.56** |
-| long-outage (6)     | val | **26.59** | 27.09 | 293.10 | 147.21 |
-|                     | test | 40.65 | 70.56 | 75.45 | **5.19** |
+**Outage.** GPS channels are zeroed for 100 windows (10 s), from window 100 to 199, with
+a 3-window ramp on the outage flag at onset. Position is integrated from outage onset.
 
-### Overall
+**Split — leave-one-flight-out.** Whole flights are assigned to train / validation /
+test. We run 5 folds; each flight is the test flight once, with 3 flights for training
+and 1 held-out flight for validation and model selection. **No window shares a flight
+across splits**, so there is no train/test leakage.
 
-| Metric | Split | GateIO | LSTM | EKF | Const-v |
-|---|---|---:|---:|---:|---:|
-| Mean (m)     | val  | **6.72** | 7.78 | 74.80 | 30.64 |
-|              | test | **34.11** | 42.50 | 58.16 | 62.97 |
-| Median (m)   | val  | 0.90 | **0.73** | 10.44 | 2.37 |
-|              | test | 28.24 | 42.79 | 11.19 | **2.06** |
-| 90th pct (m) | val  | **27.82** | 37.95 | 287.79 | 117.09 |
-|              | test | **41.36** | 70.71 | 165.23 | 96.43 |
-| % under 5 m  | val  | 76.3% | **79.7%** | 13.6% | 74.6% |
-|              | test | 0.0% | 0.0% | 11.9% | **84.7%** |
+**Normalisation.** Per-channel median and IQR are computed on the training flights only
+(target IQR floored at 0.1 m/s; quaternion channels passed through unscaled).
 
-Per-sequence results are in [`results/val_all_results.csv`](results/val_all_results.csv)
-and [`results/test_all_results.csv`](results/test_all_results.csv).
+**Baselines.** Constant-velocity (hold the last GPS velocity); a 6-state EKF with
+per-timestep quaternion gravity compensation, with process and measurement noise tuned
+by Nelder-Mead on each fold's validation flight only — never on the test flight.
 
-**Per-group mean drift, validation vs test.** The learned models keep turns bounded
-where the classical baselines diverge; on held-out flights they pay a large fixed cost
-on straight segments.
-
-![Per-group mean drift](results/figures/fig2_group_bars.png)
-
-**Cumulative distribution of drift.** In-distribution the learned models dominate;
-out-of-distribution the constant-velocity baseline (grey) reaches the 5 m mark far
-sooner than GateIO.
-
-![Drift CDF](results/figures/fig3_drift_cdf.png)
-
-**Dead-reckoned trajectories (sealed test set).** A turn, a false-alarm, and a long
-outage. On the turn, GateIO drifts 91 m but the constant-velocity baseline drifts
-641 m; on straight/false-alarm segments GateIO drifts more than simply holding
-velocity would.
-
-![Test-set trajectories](results/figures/fig1_trajectories_test.png)
+**Metric.** Endpoint drift = horizontal (xy) position error at the last outage window,
+integrated from outage onset, in metres, averaged over all held-out test sequences; we
+also report the fraction of outages under 5 m.
 
 ---
 
@@ -117,17 +142,20 @@ velocity would.
 
 ```
 gateio/
-├── models/gateio.py            GateIO + GateIO-LSTM architecture (importable)
-├── train/train_gateio.py       training loop (script; no Colab needed)
+├── models/gateio.py               GateIO + GateIO-LSTM (residual head via --v2)
+├── train/train_gateio.py          training loop (--v2 residual, --lam-cvprior knob)
 ├── eval/
-│   ├── ekf_baseline.py         quaternion gravity-compensated EKF baseline
-│   └── evaluate.py             run all four models, print tables, save CSVs
+│   ├── ekf_baseline.py            quaternion gravity-compensated EKF
+│   ├── evaluate.py                within-flight eval + persistence-check diagnostic
+│   └── evaluate_lofo.py           leave-one-flight-out pooled evaluation
 ├── data/
-│   ├── data_loader.py          MARSDataset (windowing, normalization, outage sim)
-│   └── preprocess/             raw-bag → NPZ preprocessing (v2 = paper split)
-├── notebooks/                  cleaned training / evaluation notebooks (01–04)
-├── results/                    per-sequence CSVs, trajectory arrays, figures
-└── paper/                      preprint (PDF)
+│   ├── data_loader.py             MARSDataset (windowing, normalization, outage sim)
+│   └── preprocess/
+│       ├── combine_and_norm_v2.py within-flight split
+│       └── combine_baglevel.py    leave-one-flight-out folds
+├── notebooks/                     cleaned training / evaluation notebooks
+├── results/                       per-sequence CSVs, LOFO summary, figures
+└── paper/                         preprint (docx/PDF) + gateio_v2_preprint.md
 ```
 
 ## Installation
@@ -138,132 +166,52 @@ cd gateio
 pip install -r requirements.txt
 ```
 
-PyTorch ≥ 2.6 is supported; the provided checkpoints must be loaded with
-`weights_only=False` (they bundle numpy arrays alongside the weights).
+PyTorch ≥ 2.6 is supported; checkpoints must be loaded with `weights_only=False`.
 
-## Reproducing the results
+## Reproducing the leave-one-flight-out result
 
-Quick architecture self-test (no data needed) — prints `186,390` parameters:
+Build the 5 folds (needs the per-flight `transformer_ds_<flight>.npz` files), train v2
+on each, then pool:
+
+```bash
+for k in 0 1 2 3 4; do
+  python data/preprocess/combine_baglevel.py --fold $k \
+      --processed-dir path/to/processed --out folds/fold$k.npz
+  python train/train_gateio.py --data folds/fold$k.npz --model gateio --v2 \
+      --ckpt-dir checkpoints_lofo/fold$k
+done
+python eval/evaluate_lofo.py --folds-dir folds --ckpt-dir checkpoints_lofo
+```
+
+Quick architecture self-test (no data) — prints `186,390` parameters:
 
 ```bash
 python models/gateio.py
 ```
 
-Evaluate all four systems on a split (needs the dataset and both checkpoints):
-
-```bash
-python eval/evaluate.py \
-    --data path/to/MARS_Master_Dataset.npz \
-    --gateio-ckpt path/to/marsnet_r20_final.pt \
-    --lstm-ckpt   path/to/marsnet_lstm_best.pt \
-    --split val --out-dir results
-```
-
-The evaluation prints a per-sequence sanity check that must land on
-`S0 ≈ 0.29 m, S41 ≈ 2.55 m, S47 ≈ 29.08 m` and a validation mean of **6.72 m**. If
-those are off, the dataset is the wrong version (see [Dataset](#dataset)).
-
-Train from scratch (GateIO or the LSTM baseline):
-
-```bash
-python train/train_gateio.py --data path/to/MARS_Master_Dataset.npz \
-    --model gateio --ckpt-dir ./checkpoints
-```
-
-Run the EKF baseline alone (re-tune with `--tune`):
-
-```bash
-python eval/ekf_baseline.py --data path/to/MARS_Master_Dataset.npz
-```
+The within-flight numbers (for contrast) come from `eval/evaluate.py` on a dataset built
+with `combine_and_norm_v2.py`; add `--persistence-check` to see the diagnostic that
+motivated the residual head.
 
 ## Dataset
 
-Results use the **v2 within-flight chronological 80/10/10 split** derived from the
-[MARS-LVIG dataset](https://mars.hku.hk/dataset.html) (Li et al., 2024) UAV logs:
-59 validation and 59 test sequences, each a 30 s window at 10 Hz with a simulated
-10 s outage. The normalization statistics of the correct file are
-`Y_iqr = [1.516, 7.985, 0.100]`, `Y_median = [-0.146, 0.820, 0.003]`, and it reports
-59 validation sequences. A file with `Y_iqr = [0.1, 0.1, 0.1]` or a different sequence
-count is the in-development bag-level (v3) dataset and will **not** reproduce these
-numbers. Regenerate the v2 file with `data/preprocess/combine_and_norm_v2.py`.
-
-## Evaluation protocol
-
-All results use a fixed protocol; the numbers below are our own measurements on
-MARS-LVIG (5 flights, DJI M300 RTK) and can be reproduced with the scripts in this repo.
-
-**Task.** During a simulated GPS outage the model predicts GPS velocity from IMU data
-and the last known GPS-aided velocity. Velocity is integrated to a position estimate and
-scored by horizontal endpoint drift.
-
-**Windowing.** Each input window is 200 IMU samples (1.0 s at 200 Hz) and is encoded to
-one token; predictions are made at 10 Hz. A sequence is 300 windows (30 s).
-
-**Outage.** GPS channels are zeroed for 100 windows (10 s), from window 100 to 199, with
-a 3-window ramp on the outage flag at onset. Position is integrated from outage onset.
-
-**Split — leave-one-flight-out.** Whole flights are assigned to train / validation / test.
-We run 5 folds; each flight is the test flight exactly once, with 3 flights for training
-and 1 held-out flight for validation and model selection. **No window shares a flight
-across splits**, so there is no train/test leakage. (An earlier within-flight 80/10/10
-split, where validation and test windows sit next to training windows from the same
-flight, inflated results roughly 3x; we do not use it for headline numbers.)
-
-**Sequence sampling.** Training uses a stride of 30 windows (15 for the two turn-heavy
-flights); validation and test use a stride of 10. Windows overlap within a flight but
-never across the flight-level split.
-
-**Normalisation.** Per-channel median and IQR are computed on the training flights only
-(target IQR floored at 0.1 m/s; quaternion channels passed through unscaled).
-
-**Baselines.**
-- Constant-velocity: hold the last GPS-aided velocity through the outage.
-- EKF: 6-state filter with per-timestep quaternion gravity compensation; process and
-  measurement noise are tuned by Nelder-Mead on each fold's validation flight only —
-  never on the test flight.
-
-**Metric.** Endpoint drift = horizontal (xy) position error at the last outage window
-(window 199), integrated from outage onset, in metres. "Mean drift" is the average over
-all held-out test sequences; we also report the fraction of outages under 5 m.
-
-**Straight / Turn grouping (reporting only).** A test sequence is labelled TURN if the
-mean absolute yaw rate over its outage exceeds 0.10 rad/s, otherwise STRAIGHT. (Training
-separately up-weights turn windows using a 0.5 rad/s max-gyro threshold.)
-
-**Pooled result.** Metrics are computed over all 1,390 held-out test sequences from the
-5 folds combined.
-
-### Leave-one-flight-out result (mean endpoint drift, m)
-
-| Group | GateIO | EKF | Const-v | GateIO % < 5 m |
-|---|---:|---:|---:|---:|
-| Straight (1200) | 20.8 | 55.9 | 41.4 | 48% |
-| Turn (190) | 40.0 | 374.8 | 360.6 | 6% |
-| All (1390) | 23.4 | 99.5 | 85.0 | 42% |
-
-Per test flight (all sequences): gnss01 27.3, gnss02 13.1, gnss03 17.6,
-island_gnss02 23.9, island_gnss03 35.0. Reproduce with
-`eval/evaluate_lofo.py` (per-sequence CSV via `--out`); see `results/lofo_summary.csv`
-and `results/figures/fig_lofo.png`.
+Derived from the [MARS-LVIG dataset](https://mars.hku.hk/dataset.html) (Li et al., 2024):
+five UAV flights from a DJI M300 RTK platform, three from an airport site and two from an
+island site. Two flights (gnss03, island_gnss03) carry most of the turning. Sequences are
+30 s at 10 Hz with a simulated 10 s outage. The leave-one-flight-out folds are built by
+`combine_baglevel.py`; the within-flight split by `combine_and_norm_v2.py`.
 
 ## Limitations
 
-Our headline validation metrics (6.72 m mean, 76% of outages under 5 m) are measured
-on a within-flight chronological split, in which validation sequences are temporally
-adjacent to training data from the same flights. On the sealed test set — held-out
-segments whose flight dynamics the model has not seen — GateIO's error rises sharply on
-non-turning motion (straight-short: 0.63 m → 30.4 m), and a naive constant-velocity
-baseline attains lower median error (2.06 m vs 28.24 m) and stays under 5 m far more
-often (84.7% vs 0%). GateIO retains an advantage only in mean drift, and only because
-it avoids the catastrophic dead-reckoning failure that the constant-velocity and EKF
-baselines exhibit during turns (up to 598 m and 645 m respectively). We therefore read
-these results as evidence for a specific claim — that a yaw-rate-gated learned
-dead-reckoning model prevents turn-induced divergence where classical filters diverge —
-rather than as a general-purpose GPS-outage bridging solution. The gap between
-validation and test performance indicates the model partly fits flight-specific
-dynamics under the within-flight split; a bag-level split that fully isolates flights,
-together with retraining, is required to measure true cross-flight generalization and
-is left to future work.
+- **Small dataset.** Five flights, two sites, one platform. Leave-one-flight-out gives
+  five folds with a single validation and test flight each, so per-flight estimates have
+  low statistical power. This is the main limit on generalization.
+- **Modest absolute accuracy.** 23 m mean drift and 42% of outages under 5 m is a
+  research result, not a fielded navigation solution.
+- **No uncertainty and no filter coupling.** GateIO gives a point estimate; predicting
+  uncertainty and fusing it with a filter is known to help and is not done here.
+- **No published learned baseline.** We compare to constant-velocity, a tuned EKF, and
+  our own LSTM, not to published learned-odometry methods run on this data.
 
 ## License
 
@@ -276,7 +224,7 @@ Released under the [MIT License](LICENSE).
   title  = {GateIO: Yaw-Rate-Gated Learned Dead Reckoning for UAV GPS-Outage Bridging},
   author = {Saxena, Nandini},
   year   = {2026},
-  note   = {Preprint},
+  note   = {Manuscript in preparation},
   url    = {https://github.com/nandini1612/gateio}
 }
 ```
