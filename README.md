@@ -187,6 +187,65 @@ Results use the **v2 within-flight chronological 80/10/10 split** derived from t
 count is the in-development bag-level (v3) dataset and will **not** reproduce these
 numbers. Regenerate the v2 file with `data/preprocess/combine_and_norm_v2.py`.
 
+## Evaluation protocol
+
+All results use a fixed protocol; the numbers below are our own measurements on
+MARS-LVIG (5 flights, DJI M300 RTK) and can be reproduced with the scripts in this repo.
+
+**Task.** During a simulated GPS outage the model predicts GPS velocity from IMU data
+and the last known GPS-aided velocity. Velocity is integrated to a position estimate and
+scored by horizontal endpoint drift.
+
+**Windowing.** Each input window is 200 IMU samples (1.0 s at 200 Hz) and is encoded to
+one token; predictions are made at 10 Hz. A sequence is 300 windows (30 s).
+
+**Outage.** GPS channels are zeroed for 100 windows (10 s), from window 100 to 199, with
+a 3-window ramp on the outage flag at onset. Position is integrated from outage onset.
+
+**Split — leave-one-flight-out.** Whole flights are assigned to train / validation / test.
+We run 5 folds; each flight is the test flight exactly once, with 3 flights for training
+and 1 held-out flight for validation and model selection. **No window shares a flight
+across splits**, so there is no train/test leakage. (An earlier within-flight 80/10/10
+split, where validation and test windows sit next to training windows from the same
+flight, inflated results roughly 3x; we do not use it for headline numbers.)
+
+**Sequence sampling.** Training uses a stride of 30 windows (15 for the two turn-heavy
+flights); validation and test use a stride of 10. Windows overlap within a flight but
+never across the flight-level split.
+
+**Normalisation.** Per-channel median and IQR are computed on the training flights only
+(target IQR floored at 0.1 m/s; quaternion channels passed through unscaled).
+
+**Baselines.**
+- Constant-velocity: hold the last GPS-aided velocity through the outage.
+- EKF: 6-state filter with per-timestep quaternion gravity compensation; process and
+  measurement noise are tuned by Nelder-Mead on each fold's validation flight only —
+  never on the test flight.
+
+**Metric.** Endpoint drift = horizontal (xy) position error at the last outage window
+(window 199), integrated from outage onset, in metres. "Mean drift" is the average over
+all held-out test sequences; we also report the fraction of outages under 5 m.
+
+**Straight / Turn grouping (reporting only).** A test sequence is labelled TURN if the
+mean absolute yaw rate over its outage exceeds 0.10 rad/s, otherwise STRAIGHT. (Training
+separately up-weights turn windows using a 0.5 rad/s max-gyro threshold.)
+
+**Pooled result.** Metrics are computed over all 1,390 held-out test sequences from the
+5 folds combined.
+
+### Leave-one-flight-out result (mean endpoint drift, m)
+
+| Group | GateIO | EKF | Const-v | GateIO % < 5 m |
+|---|---:|---:|---:|---:|
+| Straight (1200) | 20.8 | 55.9 | 41.4 | 48% |
+| Turn (190) | 40.0 | 374.8 | 360.6 | 6% |
+| All (1390) | 23.4 | 99.5 | 85.0 | 42% |
+
+Per test flight (all sequences): gnss01 27.3, gnss02 13.1, gnss03 17.6,
+island_gnss02 23.9, island_gnss03 35.0. Reproduce with
+`eval/evaluate_lofo.py` (per-sequence CSV via `--out`); see `results/lofo_summary.csv`
+and `results/figures/fig_lofo.png`.
+
 ## Limitations
 
 Our headline validation metrics (6.72 m mean, 76% of outages under 5 m) are measured
