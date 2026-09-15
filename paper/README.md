@@ -1,6 +1,7 @@
 # Paper
 
-- **`gateio_v2_preprint.md`** — current draft. Built around the leakage-free
+- **`gateio_v2_preprint.pdf`** — current formatted preprint (also `gateio_v2_preprint.md`
+  source, `gateio_v2_preprint.docx` editable). Built around the leakage-free
   **leave-one-flight-out** evaluation (23.4 m mean drift, 3.6× better than the classical
   baselines). This is the honest headline result and the version to read.
 
@@ -10,4 +11,4 @@
   accuracy roughly 3×. These files are kept for history and are **superseded** by the v2
   draft above; do not cite the 6.72 m figure as the result.
 
-A formatted v2 PDF will replace `gateio_preprint.pdf` once the draft is finalised.
+The v1 `gateio_preprint.pdf` is kept only for history; cite `gateio_v2_preprint.pdf`.
