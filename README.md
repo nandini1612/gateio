@@ -61,9 +61,20 @@ leave-one-flight-out). We keep them to show the size of the effect.
 
 The within-flight *validation* number (6.72 m) looks strong; the sealed within-flight
 *test* number (34 m) already hints at the problem, and leave-one-flight-out confirms it.
-Full per-group tables and figures: [`results/val_all_results.csv`](results/val_all_results.csv),
-[`results/test_all_results.csv`](results/test_all_results.csv),
-`results/figures/fig2_group_bars.png`, `results/figures/fig3_drift_cdf.png`.
+Per-sequence tables: [`results/val_all_results.csv`](results/val_all_results.csv),
+[`results/test_all_results.csv`](results/test_all_results.csv).
+
+**Per-group mean drift, validation vs test.** The learned models keep turns bounded where
+the classical baselines diverge; on held-out flights they pay a large fixed cost on
+straight segments.
+
+![Per-group mean drift, within-flight split](results/figures/fig2_group_bars.png)
+
+**Cumulative distribution of drift.** In-distribution the learned models dominate;
+out-of-distribution the constant-velocity baseline (grey) reaches the 5 m mark far sooner
+than GateIO.
+
+![Drift CDF, within-flight split](results/figures/fig3_drift_cdf.png)
 
 ---
 
@@ -86,6 +97,8 @@ predicted velocity *change* toward zero — hold the last known velocity. Above 
 threshold (turns) the gate is off and the drift loss shapes the prediction. An earlier
 ungated version of this prior fought the drift loss on turns and lost; gating is what
 lets it carry weight.
+
+![The yaw-rate gate](results/figures/gate.svg)
 
 ### Residual output (v2)
 
