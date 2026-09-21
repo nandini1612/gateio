@@ -58,6 +58,8 @@ def main():
                     help="Sequence index to draw; default = the one nearest the fold's median drift.")
     ap.add_argument("--prefer", choices=["any", "turn", "straight"], default="any",
                     help="Restrict the auto-pick to turning / straight sequences.")
+    ap.add_argument("--dual", action="store_true",
+                    help="Two panels: a typical straight outage and a turn, each at its group median.")
     ap.add_argument("--out", default="results/figures/fig_trajectory.png")
     args = ap.parse_args()
 
@@ -85,39 +87,57 @@ def main():
         out = predict_sequence(model, xns, yrs, os_, oe_, dv_iqr, dv_median, device)
         recs.append((si, out["drift_m"], classify(xrs, os_, oe_), xns, yrs))
 
-    if args.seq is not None:
-        chosen = next(r for r in recs if r[0] == args.seq)
-    else:
-        pool = [r for r in recs if args.prefer == "any" or r[2].lower() == args.prefer]
+    def pick(group_filter):
+        """The sequence whose drift is nearest the median of its group (or all)."""
+        pool = [r for r in recs if group_filter == "any" or r[2].lower() == group_filter]
         pool = pool or recs
         med = float(np.median([r[1] for r in pool]))
-        chosen = min(pool, key=lambda r: abs(r[1] - med))
-    si, drift, grp, xns, yrs = chosen
+        return min(pool, key=lambda r: abs(r[1] - med))
 
-    out = predict_sequence(model, xns, yrs, os_, oe_, dv_iqr, dv_median, device)
-    pp, pt = out["pos_pred"], out["pos_true"]
-    pc = constv_path(yrs, os_, oe_)
+    def draw(ax, chosen, show_ylabel=True):
+        si, drift, grp, xns, yrs = chosen
+        out = predict_sequence(model, xns, yrs, os_, oe_, dv_iqr, dv_median, device)
+        pp, pt = out["pos_pred"], out["pos_true"]
+        pc = constv_path(yrs, os_, oe_)
+        ax.plot(pt[os_:oe_, 0], pt[os_:oe_, 1], color=INK, lw=3.0, label="Ground truth", zorder=3)
+        ax.plot(pp[os_:oe_, 0], pp[os_:oe_, 1], color=BLUE, lw=2.4, label=label, zorder=4)
+        ax.plot(pc[os_:oe_, 0], pc[os_:oe_, 1], color=GREY, lw=2.0, ls="--",
+                label="Constant velocity", zorder=2)
+        ax.scatter([0], [0], color="black", s=45, zorder=5, label="Outage onset")
+        ax.plot([pt[oe_ - 1, 0], pp[oe_ - 1, 0]], [pt[oe_ - 1, 1], pp[oe_ - 1, 1]],
+                color=ORANGE, lw=1.4, ls=":", zorder=4)
+        ax.annotate(f"{drift:.1f} m", (pp[oe_ - 1, 0], pp[oe_ - 1, 1]),
+                    textcoords="offset points", xytext=(8, 6), color=ORANGE, fontsize=10)
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.set_xlabel("East (m)")
+        if show_ylabel:
+            ax.set_ylabel("North (m)")
+        ax.set_title(f"{grp.title()} outage, {label} drift {drift:.1f} m", color=INK, fontsize=11)
+        ax.legend(loc="best", frameon=False, fontsize=8.5)
+        ax.grid(alpha=0.25)
+        return si, grp, drift
 
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+
+    if args.dual:
+        fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.6), dpi=150)
+        s0 = draw(axes[0], pick("straight"), show_ylabel=True)
+        s1 = draw(axes[1], pick("turn"), show_ylabel=False)
+        fig.suptitle(f"Held-out {flight}: a typical straight outage and a turn (10 s)",
+                     color=INK, fontsize=13, fontweight="bold")
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.savefig(args.out, bbox_inches="tight", facecolor="white")
+        print(f"fold {args.fold} ({flight}): straight seq {s0[0]} {s0[2]:.1f} m | "
+              f"turn seq {s1[0]} {s1[2]:.1f} m")
+        print(f"wrote {args.out}")
+        return
+
+    chosen = next(r for r in recs if r[0] == args.seq) if args.seq is not None else pick(args.prefer)
     fig, ax = plt.subplots(figsize=(6.4, 6.0), dpi=150)
-    ax.plot(pt[os_:oe_, 0], pt[os_:oe_, 1], color=INK, lw=3.0, label="Ground truth", zorder=3)
-    ax.plot(pp[os_:oe_, 0], pp[os_:oe_, 1], color=BLUE, lw=2.4, label=label, zorder=4)
-    ax.plot(pc[os_:oe_, 0], pc[os_:oe_, 1], color=GREY, lw=2.0, ls="--",
-            label="Constant velocity", zorder=2)
-    ax.scatter([0], [0], color="black", s=45, zorder=5, label="Outage onset")
-    # endpoint drift marker (GateIO vs truth)
-    ax.plot([pt[oe_ - 1, 0], pp[oe_ - 1, 0]], [pt[oe_ - 1, 1], pp[oe_ - 1, 1]],
-            color=ORANGE, lw=1.4, ls=":", zorder=4)
-    ax.annotate(f"{drift:.1f} m", (pp[oe_ - 1, 0], pp[oe_ - 1, 1]),
-                textcoords="offset points", xytext=(8, 6), color=ORANGE, fontsize=10)
-
-    ax.set_aspect("equal", adjustable="datalim")
-    ax.set_xlabel("East (m)"); ax.set_ylabel("North (m)")
+    si, grp, drift = draw(ax, chosen)
     ax.set_title(f"Held-out {flight}, {grp.lower()} outage (10 s)\n"
                  f"{label} endpoint drift {drift:.1f} m", color=INK, fontsize=12)
-    ax.legend(loc="best", frameon=False, fontsize=9.5)
-    ax.grid(alpha=0.25)
     fig.tight_layout()
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight", facecolor="white")
     print(f"fold {args.fold} ({flight}): drew seq {si}  group={grp}  drift={drift:.2f} m")
     print(f"wrote {args.out}")
