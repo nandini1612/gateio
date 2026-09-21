@@ -52,6 +52,8 @@ def main():
     ap.add_argument("--folds-dir", required=True)
     ap.add_argument("--ckpt-dir", required=True)
     ap.add_argument("--fold", type=int, default=2, help="Which fold's test flight to draw.")
+    ap.add_argument("--model", choices=["lstm", "gateio"], default="lstm",
+                    help="Backbone to plot (lstm = GateIO-LSTM, the primary model).")
     ap.add_argument("--seq", type=int, default=None,
                     help="Sequence index to draw; default = the one nearest the fold's median drift.")
     ap.add_argument("--prefer", choices=["any", "turn", "straight"], default="any",
@@ -59,16 +61,17 @@ def main():
     ap.add_argument("--out", default="results/figures/fig_trajectory.png")
     args = ap.parse_args()
 
+    label = "GateIO-LSTM" if args.model == "lstm" else "GateIO-TCN"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     fold_npz = os.path.join(args.folds_dir, f"fold{args.fold}.npz")
-    ckpt = os.path.join(args.ckpt_dir, f"fold{args.fold}", "gateio_v2_best.pt")
+    ckpt = os.path.join(args.ckpt_dir, f"fold{args.fold}", f"{args.model}_v2_best.pt")
     npz = np.load(fold_npz)
     Xt = npz["X_test"].astype(np.float32); Yt = npz["Y_test"].astype(np.float32)
     ti = npz["test_valid_idx"]
     Xmed = npz["X_median"].astype(np.float32); Xiq = npz["X_iqr"].astype(np.float32)
     dv_iqr = npz["Y_iqr"].astype(np.float32); dv_median = npz["Y_median"].astype(np.float32)
     flight = str(npz["split_test"]) if "split_test" in npz.files else f"fold{args.fold}"
-    model = load_model(ckpt, "gateio", device)
+    model = load_model(ckpt, args.model, device)
 
     os_ = SEQ_LEN // 3; oe_ = min(os_ + OE_LEN, SEQ_LEN)
 
@@ -97,7 +100,7 @@ def main():
 
     fig, ax = plt.subplots(figsize=(6.4, 6.0), dpi=150)
     ax.plot(pt[os_:oe_, 0], pt[os_:oe_, 1], color=INK, lw=3.0, label="Ground truth", zorder=3)
-    ax.plot(pp[os_:oe_, 0], pp[os_:oe_, 1], color=BLUE, lw=2.4, label="GateIO", zorder=4)
+    ax.plot(pp[os_:oe_, 0], pp[os_:oe_, 1], color=BLUE, lw=2.4, label=label, zorder=4)
     ax.plot(pc[os_:oe_, 0], pc[os_:oe_, 1], color=GREY, lw=2.0, ls="--",
             label="Constant velocity", zorder=2)
     ax.scatter([0], [0], color="black", s=45, zorder=5, label="Outage onset")
@@ -110,7 +113,7 @@ def main():
     ax.set_aspect("equal", adjustable="datalim")
     ax.set_xlabel("East (m)"); ax.set_ylabel("North (m)")
     ax.set_title(f"Held-out {flight}, {grp.lower()} outage (10 s)\n"
-                 f"GateIO endpoint drift {drift:.1f} m", color=INK, fontsize=12)
+                 f"{label} endpoint drift {drift:.1f} m", color=INK, fontsize=12)
     ax.legend(loc="best", frameon=False, fontsize=9.5)
     ax.grid(alpha=0.25)
     fig.tight_layout()
