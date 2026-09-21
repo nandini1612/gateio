@@ -1,18 +1,16 @@
 # GateIO: Learned Dead Reckoning for UAV GPS-Outage Bridging, Tested Across Held-Out Flights
 
 **Nandini Saxena**
-Independent research (begun during a research internship at DIAT)
-nandinisaxenawork@gmail.com
-
-Manuscript in preparation, 2026. Code: https://github.com/nandini1612/gateio
+nsaxena23-cse@bvucoep.edu.in, nandinisaxenawork@gmail.com
+Code: https://github.com/nandini1612/gateio
 
 ---
 
 ## Abstract
 
-When a UAV loses GPS, it has to track its own motion from the inertial sensors until the signal returns. Holding the last velocity works while the aircraft flies straight, but as soon as it turns the horizontal velocity changes with the yaw rate, and a straight-line guess drifts fast. GateIO is a small causal network that predicts GPS velocity through the outage from the inertial data and the last velocity the GPS reported. It carries one rule from flight physics: when the yaw rate is low it stays near the last known velocity, and when the yaw rate is high that rule is dropped so the network can learn the turn.
+When a UAV loses GPS, it has to track its own motion from the inertial sensors until the signal returns. Holding the last velocity works while the aircraft flies straight, but as soon as it turns the horizontal velocity changes with the yaw rate, and a straight-line guess drifts fast. GateIO is a small causal model that predicts GPS velocity through the outage from the inertial data and the last velocity the GPS reported. It carries one rule from flight physics: when the yaw rate is low it stays near the last known velocity, and when the yaw rate is high that rule is dropped so the model can learn the turn. GateIO names a formulation rather than one network; we test it with two backbones, a recurrent one and a convolution-plus-attention one.
 
-Most of what we learned here is about how to test such a model. If the train, validation, and test windows are cut from the same flights, information leaks across them, and GateIO looks very good: about 7 m of drift over a 10-second outage. We instead hold out whole flights, one at a time, and evaluate on flights the model never saw. The drift then rises to 23.4 m, averaged over 1,390 held-out outages. That is still 3.6 times lower than a tuned extended Kalman filter and a constant-velocity baseline (99.5 m and 85.0 m), and 9 times lower on turns. We treat the leakage-free number as the real one, and the gap between the two setups as a warning worth repeating. On this five-flight dataset, learning helps, but cross-flight bridging is far from solved.
+Two findings shape the paper. The first is about how to test such a model: if the train, validation, and test windows are cut from the same flights, information leaks across them and the model looks very good, about 7 m of drift over a 10-second outage. We instead hold out whole flights, one at a time, and evaluate on flights the model never saw. The drift then rises to 11.2 m for the recurrent backbone, averaged over 1,390 held-out outages, still about 7.5 times lower than a tuned extended Kalman filter (99.5 m) and a constant-velocity baseline (85.0 m), and ten times lower on turns. The second finding is that the backbone matters less than the formulation: a higher-capacity convolution-plus-attention network reaches only 23.4 m on the same held-out flights, worse than the simpler recurrent one, which we attribute to the small five-flight dataset. We treat the leakage-free numbers as the real ones. Learning helps, but cross-flight bridging is far from solved.
 
 ## 1. Introduction
 
@@ -20,7 +18,7 @@ Small UAVs lose GPS often enough that it has to be planned for: near buildings, 
 
 The usual answer is a Kalman filter with a constant-velocity or constant-acceleration model. It does well on straight flight. Its weakness is that it cannot tell a turn is happening, so it keeps projecting the old velocity forward and the error runs away. A learned model can do better here, because it can pick up motion patterns a fixed model ignores. Most learned inertial odometry so far is built for pedestrians or ground and hand-held devices. Flight is a harder case: the speeds are higher, the aircraft banks into turns, and the useful signal is split across the accelerometer, the gyroscope, and the attitude estimate.
 
-GateIO predicts GPS velocity during the outage and integrates it to a position. Its one prior comes from how aircraft fly: at low yaw rate the horizontal velocity barely changes, so the model is kept near the last known velocity; at high yaw rate the prior is switched off and the drift term takes over. The contributions are three. First, GateIO itself, a 186k-parameter causal model with a yaw-rate gate and a residual output head. Second, an evaluation that shows a within-flight split overstates accuracy by a wide margin. Third, an error analysis that explains why an earlier version did not generalise, and a fix that recovers most of the loss on unseen straight flight. We do not oversell the result: under the honest setup the mean drift is 23.4 m and 42% of outages stay under 5 m.
+GateIO predicts GPS velocity during the outage and integrates it to a position. Its one prior comes from how aircraft fly: at low yaw rate the horizontal velocity barely changes, so the model is kept near the last known velocity; at high yaw rate the prior is switched off and the drift term takes over. The contributions are three. First, the formulation itself, a yaw-rate gate with a residual output head, which we instantiate with two backbones, a two-layer LSTM and a convolution-plus-attention network, and find that the recurrent one generalises better on this data. Second, an evaluation that shows a within-flight split overstates accuracy by a wide margin. Third, an error analysis that explains why an earlier version did not generalise, and a fix that recovers most of the loss on unseen straight flight. We do not oversell the result: under the honest setup the best model's mean drift is 11.2 m and 55% of outages stay under 5 m.
 
 ## 2. Related Work
 
@@ -38,9 +36,11 @@ We use five flights from MARS-LVIG: three over an airport (gnss01, gnss02, gnss0
 
 ### 4.1 Architecture
 
-GateIO has four parts. A window encoder turns each 200-sample window into a 48-dimensional token using three 1D convolutions (kernels 7, 5, 3) with group normalisation, then attention pooling. An outage-step encoding adds a sinusoidal count of steps since the outage began, reset whenever GPS is available. A backbone of dilated causal convolutions, with a receptive field near 25 s, feeds one layer of causal attention with ALiBi bias. A velocity head has two branches, one for GPS-aided steps and one for outage steps, the second taking the last known velocity as input. The model has 186,390 parameters. The recurrent baseline, GateIO-LSTM, swaps the convolution-and-attention backbone for a two-layer LSTM and keeps everything else.
+GateIO has a shared front end and head, with the backbone as the one interchangeable part. A window encoder turns each 200-sample window into a 48-dimensional token using three 1D convolutions (kernels 7, 5, 3) with group normalisation, then attention pooling. An outage-step encoding adds a sinusoidal count of steps since the outage began, reset whenever GPS is available. A velocity head has two branches, one for GPS-aided steps and one for outage steps, the second taking the last known velocity as input. Between the encoder and the head sits the backbone, for which we test two options. GateIO-LSTM uses a two-layer causal LSTM (265,334 parameters). GateIO-TCN uses dilated causal convolutions with a receptive field near 25 s, feeding one layer of causal attention with ALiBi bias (186,390 parameters). Everything else is identical. On held-out flights the recurrent backbone is the more accurate of the two (Section 6), so we treat GateIO-LSTM as the primary model.
 
 ![GateIO architecture](../results/figures/architecture.png)
+
+The diagram shows the GateIO-TCN backbone; GateIO-LSTM replaces the convolution-and-attention block with the two-layer LSTM and is otherwise identical.
 
 ### 4.2 The yaw-rate gate
 
@@ -72,26 +72,34 @@ Under the within-flight split GateIO reaches about 7 m and is selected on valida
 
 Pooled over 1,390 held-out sequences across the five flights. A sequence is labelled Turn when its mean yaw rate during the outage is above 0.10 rad/s, and Straight otherwise. Endpoint drift is in metres; lower is better.
 
-| Group | GateIO | EKF | Const-v | GateIO < 5 m |
-|---|---:|---:|---:|---:|
-| Straight (1200) | **20.8** | 55.9 | 41.4 | 48% |
-| Turn (190) | **40.0** | 374.8 | 360.6 | 6% |
-| All (1390) | **23.4** | 99.5 | 85.0 | 42% |
+Both learned models use the same yaw-rate-gated residual head; they differ only in the backbone.
+
+| Group | GateIO-LSTM | GateIO-TCN | EKF | Const-v | LSTM < 5 m |
+|---|---:|---:|---:|---:|---:|
+| Straight (1200) | **7.2** | 20.8 | 55.9 | 41.4 | 62% |
+| Turn (190) | **36.8** | 40.0 | 374.8 | 360.6 | 6% |
+| All (1390) | **11.2** | 23.4 | 99.5 | 85.0 | 55% |
 
 ![Leave-one-flight-out drift](../results/figures/fig_lofo.png)
 
-By flight, GateIO's all-sequence drift is 27.3 (gnss01), 13.1 (gnss02), 17.6 (gnss03), 23.9 (island_gnss02), and 35.0 m (island_gnss03). Against the constant-velocity baseline the drift is 3.6 times lower, and against the tuned EKF 4.2 times lower; on turns the factor is 9, on straight flight it is 2. The constant-velocity baseline is not sharp on straight flight here (41 m): across flights, even low-yaw segments change speed, which is why a learned velocity model helps and holding the last velocity does not.
+By flight, GateIO-LSTM's all-sequence drift is 4.1 (gnss01), 11.1 (gnss02), 20.3 (gnss03), 16.5 (island_gnss02), and 30.1 m (island_gnss03); the recurrent backbone wins on four of the five flights, the convolutional one only on gnss03. Against the constant-velocity baseline GateIO-LSTM's drift is 7.6 times lower, and against the tuned EKF 8.9 times lower; on turns the factor is about ten, on straight flight about six. The constant-velocity baseline is not sharp on straight flight here (41 m): across flights, even low-yaw segments change speed, which is why a learned velocity model helps and holding the last velocity does not. The convolution-plus-attention backbone tracks turns about as well but carries a heavy tail on straight flight: its median drift is 10.8 m, yet individual sequences reach past 60 m, which is what lifts its mean to 23.4 m.
+
+![Held-out trajectories](../results/figures/fig_trajectory.png)
+
+Figure 4 shows two held-out outages on gnss03: a typical straight segment and a turn. On the straight segment, the common case, GateIO-LSTM tracks the true path within a few metres over ten seconds. On the turn, constant velocity leaves along the pre-outage heading and diverges from the true path, while GateIO-LSTM follows the curve and its error stays bounded. Turns are about one outage in seven, and they are where the learned model earns its margin over the classical baselines.
 
 ### 6.2 Within-flight, for contrast
 
-On the within-flight split the same model reaches about 7 m, with straight sequences near 1 to 2 m. We report it only to show the size of the leakage: the distance between 7 m and 23 m is what the split adds.
+On the within-flight split the models reach about 7 m, with straight sequences near 1 to 2 m. We report it only to show the size of the leakage: the distance between 7 m and the leakage-free numbers is what the split adds.
 
-| Metric (within-flight) | GateIO | LSTM | EKF | Const-v |
+| Metric (within-flight) | GateIO-LSTM | GateIO-TCN | EKF | Const-v |
 |---|---:|---:|---:|---:|
-| Mean, val (m) | 6.72 | 7.78 | 74.80 | 30.64 |
-| Mean, test (m) | 34.11 | 42.50 | 58.16 | 62.97 |
-| % < 5 m, val | 76.3% | 79.7% | 13.6% | 74.6% |
+| Mean, val (m) | 7.78 | 6.72 | 74.80 | 30.64 |
+| Mean, test (m) | 42.50 | 34.11 | 58.16 | 62.97 |
+| % < 5 m, val | 79.7% | 76.3% | 13.6% | 74.6% |
 | % < 5 m, test | 0.0% | 0.0% | 11.9% | 84.7% |
+
+In-distribution the convolutional backbone looks slightly better than the recurrent one, the reverse of the held-out ranking. That is one more reason to trust only the leakage-free result.
 
 ### 6.3 Diagnosis
 
@@ -107,19 +115,19 @@ A substitution test pins down the cause. On the sealed test set, before the resi
 
 ## 7. Discussion
 
-GateIO beats classical dead reckoning on unseen flights, and it wins by the most where the classical methods fail worst, on turns. It also picks up the speed changes on straight flight that a constant-velocity model misses. The size of the leakage is the second finding. A within-flight split is easy to set up and common, and it made the same model look three times better than it is, so a fair comparison of GPS-outage methods on this kind of data should hold out whole flights. The largest error that remains is that the model has no way to say it is unsure and hold the last velocity; the residual head gives it a safe default, but a learned uncertainty output fused with a filter is the direction that has helped most in related aerial work.
+GateIO beats classical dead reckoning on unseen flights, and it wins by the most where the classical methods fail worst, on turns. It also picks up the speed changes on straight flight that a constant-velocity model misses. The size of the leakage is the second finding. A within-flight split is easy to set up and common, and it made the convolutional backbone look about three times better than it is and even reversed which backbone appeared best, so a fair comparison of GPS-outage methods on this kind of data should hold out whole flights. A third point concerns the backbone: the extra capacity of the convolution-plus-attention network did not pay off. On five flights the two-layer LSTM generalised better and more stably, so we report it as the primary model and read the architecture comparison as specific to this small dataset rather than a general claim. The largest error that remains is that the model has no way to say it is unsure and hold the last velocity; the residual head gives it a safe default, but a learned uncertainty output fused with a filter is the direction that has helped most in related aerial work.
 
 ## 8. Limitations
 
-The dataset is small: five flights, two sites, one platform. Leave-one-flight-out then gives five folds with one validation and one test flight each, so a per-flight number carries little statistical weight, and this is the main limit on how far the results reach. The absolute accuracy is modest, 23 m mean and 42% of outages under 5 m, which is a research result rather than a fielded system. GateIO outputs a point estimate, with no uncertainty and no filter coupling. And the learned baseline is our own LSTM, not a published method run on this data.
+The dataset is small: five flights, two sites, one platform. Leave-one-flight-out then gives five folds with one validation and one test flight each, so a per-flight number carries little statistical weight, and this is the main limit on how far the results reach; it is also the most likely reason the higher-capacity backbone generalises worse than the recurrent one. The absolute accuracy is modest, 11 m mean and 55% of outages under 5 m for the best model, which is a research result rather than a fielded system. The backbone comparison is dataset-bound: the recurrent network wins here, but on a larger, more varied dataset the ordering could change. GateIO outputs a point estimate, with no uncertainty and no filter coupling. And the learned comparison is between two backbones of our own, not against a published method run on this data.
 
 ## 9. Conclusion
 
-GateIO bridges UAV GPS outages by predicting velocity from inertial data, held near the last known value on straight flight and free to react in turns. Tested the easy way it looks very accurate. Tested by holding out whole flights it reaches 23.4 m, 3.6 times better than the best classical baseline but far from solved. We report the leakage-free number, show why the common split inflates results, and point to more data and a learned uncertainty output as the next steps.
+GateIO bridges UAV GPS outages by predicting velocity from inertial data, held near the last known value on straight flight and free to react in turns. Tested the easy way it looks very accurate. Tested by holding out whole flights, the recurrent backbone reaches 11.2 m, about 7.5 times better than the best classical baseline but far from solved; the higher-capacity convolutional backbone does worse, at 23.4 m. We report the leakage-free numbers, show why the common split inflates results, and point to more data and a learned uncertainty output as the next steps.
 
 ## Reproducibility
 
-The code, the preprocessing, the leave-one-flight-out fold builder, and the evaluation scripts are public at https://github.com/nandini1612/gateio. The MARS-LVIG dataset is openly available (Li et al., 2024). The protocol in Section 5 — window size, outage placement, fold assignment, training-only normalisation, and the endpoint-drift metric — is fixed in the released scripts, so every number in this paper can be regenerated.
+The code, the preprocessing, the leave-one-flight-out fold builder, and the evaluation scripts are public at https://github.com/nandini1612/gateio. The MARS-LVIG dataset is openly available (Li et al., 2024). The protocol in Section 5 (window size, outage placement, fold assignment, training-only normalisation, and the endpoint-drift metric) is fixed in the released scripts, so every number in this paper can be regenerated.
 
 ## References
 
