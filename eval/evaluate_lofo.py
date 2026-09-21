@@ -48,7 +48,7 @@ def classify(xrs, os_, oe_):
     return "TURN" if gz.mean() > TURN_GYRO_THR else "STRAIGHT"
 
 
-def eval_fold(fold_npz, ckpt, device, tune_ekf=True):
+def eval_fold(fold_npz, gateio_ckpt, device, tune_ekf=True, lstm_ckpt=None):
     npz = np.load(fold_npz)
     Xt = npz["X_test"].astype(np.float32); Yt = npz["Y_test"].astype(np.float32)
     ti = npz["test_valid_idx"]
@@ -56,7 +56,8 @@ def eval_fold(fold_npz, ckpt, device, tune_ekf=True):
     dv_iqr = npz["Y_iqr"].astype(np.float32); dv_median = npz["Y_median"].astype(np.float32)
     test_flight = str(npz["split_test"]) if "split_test" in npz.files else "?"
 
-    model = load_model(ckpt, "gateio", device)
+    gmodel = load_model(gateio_ckpt, "gateio", device)
+    lmodel = load_model(lstm_ckpt, "lstm", device) if lstm_ckpt else None
 
     # EKF params: tune on this fold's val flight (never on test), else locked.
     if tune_ekf:
@@ -73,29 +74,40 @@ def eval_fold(fold_npz, ckpt, device, tune_ekf=True):
             continue
         xns = (xrs - Xmed) / np.where(Xiq < 1e-6, 1.0, Xiq)
         os_ = SEQ_LEN // 3; oe_ = min(os_ + OE_LEN, SEQ_LEN)
-        g = predict_sequence(model, xns, yrs, os_, oe_, dv_iqr, dv_median, device)["drift_m"]
+        g = predict_sequence(gmodel, xns, yrs, os_, oe_, dv_iqr, dv_median, device)["drift_m"]
+        l = (predict_sequence(lmodel, xns, yrs, os_, oe_, dv_iqr, dv_median, device)["drift_m"]
+             if lmodel is not None else np.nan)
         e = ekf.run_kf_sequence(si, q_v, q_b, r, Xt, Yt, ti, dv_iqr, dv_median)
         n = ekf.run_naive_sequence(si, Yt, ti, dv_iqr, dv_median)
-        rows.append((classify(xrs, os_, oe_), g, e, n))
+        rows.append((classify(xrs, os_, oe_), g, l, e, n))
     return test_flight, rows
 
 
 def summarize(tag, rows):
-    a = np.array([[r[1], r[2], r[3]] for r in rows], dtype=float)  # GateIO, EKF, Const-v
+    # columns: GateIO, LSTM, EKF, Const-v
+    a = np.array([[r[1], r[2], r[3], r[4]] for r in rows], dtype=float)
     if not len(a):
         return
+    has_lstm = not np.all(np.isnan(a[:, 1]))
     def line(name, mask):
         b = a[mask]
         if not len(b):
             return
-        print(f"  {name:<14}{b[:,0].mean():>9.2f}m{b[:,1].mean():>9.2f}m{b[:,2].mean():>9.2f}m"
-              f"{100*np.mean(b[:,0]<5):>8.0f}%{len(b):>5}")
+        lstm_cell = f"{b[:,1].mean():>9.2f}m" if has_lstm else f"{'—':>10}"
+        print(f"  {name:<14}{b[:,0].mean():>9.2f}m{lstm_cell}{b[:,2].mean():>9.2f}m"
+              f"{b[:,3].mean():>9.2f}m{100*np.mean(b[:,0]<5):>8.0f}%{len(b):>5}")
     grp = np.array([r[0] for r in rows])
     print(f"\n  {tag}   ({len(rows)} seqs)")
-    print(f"  {'':<14}{'GateIO':>10}{'EKF':>10}{'Const-v':>10}{'G<5m':>8}{'N':>5}")
+    print(f"  {'':<14}{'GateIO':>10}{'LSTM':>10}{'EKF':>10}{'Const-v':>10}{'G<5m':>8}{'N':>5}")
     line("STRAIGHT", grp == "STRAIGHT")
     line("TURN", grp == "TURN")
     line("all", np.ones(len(a), bool))
+    # Spread: 5 folds with one test flight each have low statistical power, so
+    # report the median and IQR of GateIO endpoint drift alongside the mean.
+    g = a[:, 0]
+    q25, med, q75 = np.percentile(g, [25, 50, 75])
+    print(f"  {'GateIO spread':<14}median {med:>6.2f} m   IQR [{q25:.2f}, {q75:.2f}] m"
+          f"   (mean {g.mean():.2f} m)")
 
 
 def main():
@@ -103,6 +115,8 @@ def main():
     ap.add_argument("--folds-dir", required=True, help="Dir with fold0.npz .. fold4.npz")
     ap.add_argument("--ckpt-dir", required=True,
                     help="Dir with fold0/gateio_v2_best.pt .. fold4/gateio_v2_best.pt")
+    ap.add_argument("--lstm", action="store_true",
+                    help="Also evaluate GateIO-LSTM (foldK/lstm_v2_best.pt) side-by-side.")
     ap.add_argument("--no-tune-ekf", action="store_true", help="Use locked EKF params.")
     ap.add_argument("--out", default=None,
                     help="Optional CSV path for per-sequence results (fold, flight, group, drifts).")
@@ -113,29 +127,34 @@ def main():
 
     pooled = []
     csv_rows = []
-    print("=" * 62)
+    print("=" * 66)
     for k in range(N_FOLDS):
         fold_npz = os.path.join(args.folds_dir, f"fold{k}.npz")
         ckpt = os.path.join(args.ckpt_dir, f"fold{k}", "gateio_v2_best.pt")
+        lstm_ckpt = os.path.join(args.ckpt_dir, f"fold{k}", "lstm_v2_best.pt") if args.lstm else None
         if not (os.path.exists(fold_npz) and os.path.exists(ckpt)):
             print(f"[fold {k}] missing ({fold_npz} / {ckpt}) — skipped")
             continue
-        flight, rows = eval_fold(fold_npz, ckpt, device, tune_ekf=not args.no_tune_ekf)
+        if lstm_ckpt and not os.path.exists(lstm_ckpt):
+            print(f"[fold {k}] LSTM checkpoint missing ({lstm_ckpt}) — GateIO only for this fold")
+            lstm_ckpt = None
+        flight, rows = eval_fold(fold_npz, ckpt, device,
+                                 tune_ekf=not args.no_tune_ekf, lstm_ckpt=lstm_ckpt)
         summarize(f"fold {k}: test={flight}", rows)
         pooled.extend(rows)
-        for grp, g, e, n in rows:
-            csv_rows.append((k, flight, grp, g, e, n))
+        for grp, g, l, e, n in rows:
+            csv_rows.append((k, flight, grp, g, l, e, n))
 
-    print("\n" + "=" * 62)
+    print("\n" + "=" * 66)
     summarize("LOFO POOLED (all held-out flights)", pooled)
-    print("=" * 62)
+    print("=" * 66)
 
     if args.out:
         import csv as _csv
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", newline="") as f:
             w = _csv.writer(f)
-            w.writerow(["fold", "test_flight", "group", "gateio_m", "ekf_m", "constv_m"])
+            w.writerow(["fold", "test_flight", "group", "gateio_m", "lstm_m", "ekf_m", "constv_m"])
             w.writerows(csv_rows)
         print(f"Saved per-sequence results -> {args.out}")
 
