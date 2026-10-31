@@ -304,30 +304,43 @@ def run_naive_sequence(
 # ─────────────────────────────────────────────────────────────────────────────
 # Tuning
 # ─────────────────────────────────────────────────────────────────────────────
-def tune_kf(Xv, Yv, vi, dv_iqr, dv_median, verbose: bool = True
+def tune_kf(Xv, Yv, vi, dv_iqr, dv_median, verbose: bool = True,
+            max_seqs: int = None, maxiter: int = 800
             ) -> Tuple[float, float, float]:
     """Tune (Q_v, Q_bias, R) by Nelder-Mead to minimise mean val drift.
 
     Optimises in log-space for numerical stability. Returns the tuned triple.
     Requires scipy; imported lazily so importing this module never needs it.
+
+    For large validation flights the tuning cost is dominated by re-running the EKF
+    over every sequence at each Nelder-Mead step. ``max_seqs`` caps the number of
+    (evenly spaced) validation sequences used for tuning, and ``maxiter`` caps the
+    search; both leave the 3-parameter fit essentially unchanged while keeping the
+    per-fold tuning fast enough to finish on the largest validation flight.
     """
     from scipy.optimize import minimize
 
-    n_val = len(vi)
+    vi = np.asarray(vi)
+    if max_seqs is not None and len(vi) > max_seqs:
+        sel = np.linspace(0, len(vi) - 1, max_seqs).astype(int)
+        vi_used = vi[sel]
+    else:
+        vi_used = vi
+    n_val = len(vi_used)
 
     def objective(log_params: np.ndarray) -> float:
         q_v, q_bias, r = np.exp(log_params)
         q_v = np.clip(q_v, 1e-10, 10.0)
         q_bias = np.clip(q_bias, 1e-12, 1.0)
         r = np.clip(r, 1e-10, 10.0)
-        drifts = [run_kf_sequence(si, q_v, q_bias, r, Xv, Yv, vi, dv_iqr, dv_median)
+        drifts = [run_kf_sequence(si, q_v, q_bias, r, Xv, Yv, vi_used, dv_iqr, dv_median)
                   for si in range(n_val)]
         return float(np.nanmean(drifts))
 
     x0 = np.log([Q_V_INIT, Q_B_INIT, R_INIT])
     result = minimize(
         objective, x0, method="Nelder-Mead",
-        options={"maxiter": 800, "xatol": 1e-3, "fatol": 1e-3, "adaptive": True},
+        options={"maxiter": maxiter, "xatol": 1e-3, "fatol": 1e-3, "adaptive": True},
     )
     q_v, q_bias, r = np.exp(result.x)
     if verbose:

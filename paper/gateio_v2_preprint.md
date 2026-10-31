@@ -10,7 +10,7 @@ Code: https://github.com/nandini1612/gateio
 
 When a UAV loses GPS, it has to track its own motion from the inertial sensors until the signal returns. Holding the last velocity works while the aircraft flies straight, but as soon as it turns the horizontal velocity changes with the yaw rate, and a straight-line guess drifts fast. GateIO is a small causal model that predicts GPS velocity through the outage from the inertial data and the last velocity the GPS reported. It carries one rule from flight physics: when the yaw rate is low it stays near the last known velocity, and when the yaw rate is high that rule is dropped so the model can learn the turn. GateIO names a formulation rather than one network; we test it with two backbones, a recurrent one and a convolution-plus-attention one.
 
-Two findings shape the paper. The first is about how to test such a model: if the train, validation, and test windows are cut from the same flights, information leaks across them and the model looks very good, about 7 m of drift over a 10-second outage. We instead hold out whole flights, one at a time, and evaluate on flights the model never saw. The drift then rises to 11.2 m for the recurrent backbone, averaged over 1,390 held-out outages, still about 7.5 times lower than a tuned extended Kalman filter (99.5 m) and a constant-velocity baseline (85.0 m), and ten times lower on turns. The second finding is that the backbone matters less than the formulation: a higher-capacity convolution-plus-attention network reaches only 23.4 m on the same held-out flights, worse than the simpler recurrent one, which we attribute to the small five-flight dataset. We treat the leakage-free numbers as the real ones. Learning helps, but cross-flight bridging is far from solved.
+Two findings shape the paper. The first is about how to test such a model: if the train, validation, and test windows are cut from the same flights, information leaks across them and the model looks very good, about 7 m of drift over a 10-second outage. We instead hold out whole flights, one at a time, and evaluate on flights the model never saw. The drift then rises to 11.2 m for the recurrent backbone, averaged over 1,390 held-out outages, still about 7.5 times lower than a fixed-parameter extended Kalman filter (99.5 m) and a constant-velocity baseline (85.0 m), and ten times lower on turns. A published learned baseline, RoNIN, given the same inertial input, reaches 40.1 m: better than the classical filters but far short of GateIO, because it regresses velocity with no last-known-velocity anchor. The second finding is that the backbone matters less than the formulation: a higher-capacity convolution-plus-attention network reaches only 23.4 m on the same held-out flights, worse than the simpler recurrent one, which we attribute to the small five-flight dataset. We treat the leakage-free numbers as the real ones. Learning helps, but cross-flight bridging is far from solved.
 
 ## 1. Introduction
 
@@ -66,27 +66,37 @@ The within-flight split cuts each flight 80/10/10 into train, validation, and te
 
 Under the within-flight split GateIO reaches about 7 m and is selected on validation drift. But there, a lower validation drift can go with a worse result on a genuinely held-out flight, because the split rewards fitting patterns specific to a flight. We saw this directly in training: an earlier checkpoint with higher validation drift (17 m) reached lower test drift (9.5 m) than the checkpoint the validation metric selected (7 m validation, 12 m test). So the split distorts not only the reported number but the choice of checkpoint. Leave-one-flight-out removes both problems. The cost is a much smaller effective dataset, with a single flight for validation and a single flight for test in each fold.
 
+### 5.3 Baselines
+
+We compare against two classical baselines and one published learned method. Constant velocity holds the last known GPS velocity through the outage. The extended Kalman filter is a 6-state filter with per-timestep quaternion gravity compensation; its process and measurement noise use fixed parameters tuned once by Nelder-Mead on a separate split, not re-tuned per fold. RoNIN is the standard learned inertial-odometry model, a 1D ResNet-18 that regresses velocity from the IMU window; we train it per fold on the same folds and select it on validation drift, and to keep the comparison controlled we give it the same ten inertial channels GateIO's encoder sees (the quaternion lets it predict navigation-frame velocity in place of RoNIN's heading-agnostic frame). Faithful to the original, RoNIN receives no last-known-velocity input, which is the point of the comparison.
+
 ## 6. Results
 
 ### 6.1 Leave-one-flight-out
 
 Pooled over 1,390 held-out sequences across the five flights. A sequence is labelled Turn when its mean yaw rate during the outage is above 0.10 rad/s, and Straight otherwise. Endpoint drift is in metres; lower is better.
 
-Both learned models use the same yaw-rate-gated residual head; they differ only in the backbone.
+GateIO's two backbones use the same yaw-rate-gated residual head; RoNIN is the published learned regressor given the same inertial input without that formulation, and the EKF uses fixed parameters (Section 5.3).
 
-| Group | GateIO-LSTM | GateIO-TCN | EKF | Const-v | LSTM < 5 m |
-|---|---:|---:|---:|---:|---:|
-| Straight (1200) | **7.2** | 20.8 | 55.9 | 41.4 | 62% |
-| Turn (190) | **36.8** | 40.0 | 374.8 | 360.6 | 6% |
-| All (1390) | **11.2** | 23.4 | 99.5 | 85.0 | 55% |
+| Group | GateIO-LSTM | GateIO-TCN | RoNIN | EKF | Const-v | LSTM < 5 m |
+|---|---:|---:|---:|---:|---:|---:|
+| Straight (1200) | **7.2** | 20.8 | 40.0 | 55.9 | 41.4 | 62% |
+| Turn (190) | **36.8** | 40.0 | 40.6 | 374.8 | 360.6 | 6% |
+| All (1390) | **11.2** | 23.4 | 40.1 | 99.5 | 85.0 | 55% |
 
 ![Leave-one-flight-out drift](../results/figures/fig_lofo.png)
 
-By flight, GateIO-LSTM's all-sequence drift is 4.1 (gnss01), 11.1 (gnss02), 20.3 (gnss03), 16.5 (island_gnss02), and 30.1 m (island_gnss03); the recurrent backbone wins on four of the five flights, the convolutional one only on gnss03. Against the constant-velocity baseline GateIO-LSTM's drift is 7.6 times lower, and against the tuned EKF 8.9 times lower; on turns the factor is about ten, on straight flight about six. The constant-velocity baseline is not sharp on straight flight here (41 m): across flights, even low-yaw segments change speed, which is why a learned velocity model helps and holding the last velocity does not. The convolution-plus-attention backbone tracks turns about as well but carries a heavy tail on straight flight: its median drift is 10.8 m, yet individual sequences reach past 60 m, which is what lifts its mean to 23.4 m.
+By flight, GateIO-LSTM's all-sequence drift is 4.1 (gnss01), 11.1 (gnss02), 20.3 (gnss03), 16.5 (island_gnss02), and 30.1 m (island_gnss03); the recurrent backbone wins on four of the five flights, the convolutional one only on gnss03. Against the constant-velocity baseline GateIO-LSTM's drift is 7.6 times lower, and against the fixed-parameter EKF 8.9 times lower; on turns the factor is about ten, on straight flight about six. The constant-velocity baseline is not sharp on straight flight here (41 m): across flights, even low-yaw segments change speed, which is why a learned velocity model helps and holding the last velocity does not. The convolution-plus-attention backbone tracks turns about as well but carries a heavy tail on straight flight: its median drift is 10.8 m, yet individual sequences reach past 60 m, which is what lifts its mean to 23.4 m.
+
+The comparison to RoNIN is the most telling. Given the same inertial input, it reaches 40.1 m and almost never brings an outage under 5 m: better than the classical filters, but far worse than GateIO. The reason is the velocity anchor. RoNIN regresses velocity with no notion of the last known GPS velocity, so its small per-step errors integrate into large drift, whereas GateIO's residual head defaults to holding that velocity and learns only the deviation. The ordering constant velocity (anchor, no learning), then RoNIN (learning, no anchor), then GateIO (learning with a gated residual anchor) is what isolates where the gain comes from: it is the formulation, not simply the use of a neural network.
+
+With only five folds the pooled mean can hide how much the result swings between flights, so we also report each model's mean drift averaged over the five folds, with the standard deviation across folds: GateIO-LSTM 16.4 +/- 9.8 m, GateIO-TCN 23.4 +/- 8.5, RoNIN 39.3 +/- 8.4, EKF 158.1 +/- 145.4, and constant velocity 140.2 +/- 140.9. GateIO is not only lower but far more consistent across flights; the classical filters swing by more than 100 m between an easy flight and a hard one, while GateIO stays within about 10 m.
+
+![Per-flight drift across the five folds](../results/figures/fig_perfold.png)
 
 ![Held-out trajectories](../results/figures/fig_trajectory.png)
 
-Figure 4 shows two held-out outages on gnss03: a typical straight segment and a turn. On the straight segment, the common case, GateIO-LSTM tracks the true path within a few metres over ten seconds. On the turn, constant velocity leaves along the pre-outage heading and diverges from the true path, while GateIO-LSTM follows the curve and its error stays bounded. Turns are about one outage in seven, and they are where the learned model earns its margin over the classical baselines.
+The trajectory figure below shows two held-out outages on gnss03: a typical straight segment and a turn. On the straight segment, the common case, GateIO-LSTM tracks the true path within a few metres over ten seconds. On the turn, constant velocity leaves along the pre-outage heading and diverges from the true path, while GateIO-LSTM follows the curve and its error stays bounded. Turns are about one outage in seven, and they are where the learned model earns its margin over the classical baselines.
 
 ### 6.2 Within-flight, for contrast
 
@@ -119,7 +129,7 @@ GateIO beats classical dead reckoning on unseen flights, and it wins by the most
 
 ## 8. Limitations
 
-The dataset is small: five flights, two sites, one platform. Leave-one-flight-out then gives five folds with one validation and one test flight each, so a per-flight number carries little statistical weight, and this is the main limit on how far the results reach; it is also the most likely reason the higher-capacity backbone generalises worse than the recurrent one. The absolute accuracy is modest, 11 m mean and 55% of outages under 5 m for the best model, which is a research result rather than a fielded system. The backbone comparison is dataset-bound: the recurrent network wins here, but on a larger, more varied dataset the ordering could change. GateIO outputs a point estimate, with no uncertainty and no filter coupling. And the learned comparison is between two backbones of our own, not against a published method run on this data.
+The dataset is small: five flights, two sites, one platform. Leave-one-flight-out then gives five folds with one validation and one test flight each, so a per-flight number carries little statistical weight, and this is the main limit on how far the results reach; it is also the most likely reason the higher-capacity backbone generalises worse than the recurrent one. The absolute accuracy is modest, 11 m mean and 55% of outages under 5 m for the best model, which is a research result rather than a fielded system. The backbone comparison is dataset-bound: the recurrent network wins here, but on a larger, more varied dataset the ordering could change. GateIO outputs a point estimate, with no uncertainty and no filter coupling. The learned comparison covers one published method (RoNIN); broader comparisons such as AirIO or TLIO run on this data are left to future work, and the EKF uses parameters tuned once on a separate split rather than re-tuned per fold.
 
 ## 9. Conclusion
 

@@ -63,7 +63,8 @@ def eval_fold(fold_npz, gateio_ckpt, device, tune_ekf=True, lstm_ckpt=None):
     if tune_ekf:
         Xv = npz["X_val"].astype(np.float32); Yv = npz["Y_val"].astype(np.float32)
         vi = npz["val_valid_idx"]
-        q_v, q_b, r = ekf.tune_kf(Xv, Yv, vi, dv_iqr, dv_median, verbose=False)
+        q_v, q_b, r = ekf.tune_kf(Xv, Yv, vi, dv_iqr, dv_median, verbose=False,
+                                  max_seqs=200, maxiter=300)
     else:
         q_v, q_b, r = ekf.Q_V_OPT, ekf.Q_B_OPT, ekf.R_OPT
 
@@ -148,6 +149,43 @@ def main():
     print("\n" + "=" * 66)
     summarize("LOFO POOLED (all held-out flights)", pooled)
     print("=" * 66)
+
+    # Per-fold mean drift (all sequences) and across-fold spread. With only five
+    # folds the pooled mean hides how much the result swings between flights, so we
+    # report each fold's mean and the mean +/- std across folds for every model.
+    by_fold = {}
+    for (k, flight, grp, g, l, e, n) in csv_rows:
+        d = by_fold.setdefault(k, {"flight": flight, "g": [], "l": [], "e": [], "n": []})
+        d["g"].append(g); d["l"].append(l); d["e"].append(e); d["n"].append(n)
+    has_lstm = any(not np.all(np.isnan(d["l"])) for d in by_fold.values())
+    print("\nPer-fold mean drift (all sequences):")
+    hdr = f"  {'fold':<5}{'test flight':<16}{'GateIO':>9}" + (f"{'LSTM':>9}" if has_lstm else "") \
+          + f"{'EKF':>9}{'Const-v':>9}"
+    print(hdr)
+    pf = []
+    for k in sorted(by_fold):
+        d = by_fold[k]
+        gm, lm = np.nanmean(d["g"]), np.nanmean(d["l"])
+        em, nm = np.nanmean(d["e"]), np.nanmean(d["n"])
+        lcell = f"{lm:>8.1f}m" if has_lstm else ""
+        print(f"  {k:<5}{d['flight']:<16}{gm:>8.1f}m{lcell}{em:>8.1f}m{nm:>8.1f}m")
+        pf.append((k, d["flight"], gm, lm, em, nm))
+    arr = np.array([[r[2], r[3], r[4], r[5]] for r in pf], dtype=float)
+    mean, std = np.nanmean(arr, 0), np.nanstd(arr, 0, ddof=1)
+    labels = ["GateIO", "LSTM", "EKF", "Const-v"]
+    print("  across folds (mean +/- std over 5 folds):")
+    for j, lab in enumerate(labels):
+        if lab == "LSTM" and not has_lstm:
+            continue
+        print(f"    {lab:<10}{mean[j]:6.1f} +/- {std[j]:4.1f} m")
+    if args.out:
+        pf_path = os.path.splitext(os.path.abspath(args.out))[0] + "_perfold.csv"
+        import csv as _csv
+        with open(pf_path, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["fold", "test_flight", "gateio_m", "lstm_m", "ekf_m", "constv_m"])
+            w.writerows(pf)
+        print(f"Saved per-fold means -> {pf_path}")
 
     if args.out:
         import csv as _csv

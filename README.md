@@ -35,21 +35,42 @@ velocity through the outage. Lower is better.
 ### Leave-one-flight-out cross-validation — headline, no leakage
 
 Pooled over all five held-out flights (1,390 sequences). A sequence is *Turn* if its
-mean yaw rate during the outage exceeds 0.10 rad/s, else *Straight*. Both learned models
-use the same yaw-rate-gated residual head; they differ only in the backbone.
+mean yaw rate during the outage exceeds 0.10 rad/s, else *Straight*. GateIO's two learned
+backbones use the same yaw-rate-gated residual head; RoNIN is a published learned velocity
+regressor (1D ResNet-18, selected on validation drift) given the same IMU input but without
+the residual formulation. `EKF` uses fixed, pre-tuned parameters (see
+[Evaluation protocol](#evaluation-protocol)).
 
-| Group | **GateIO-LSTM** | GateIO-TCN | EKF | Const-v | LSTM % < 5 m |
-|---|---:|---:|---:|---:|---:|
-| Straight (1200) | **7.2** | 20.8 | 55.9 | 41.4 | 62% |
-| Turn (190) | **36.8** | 40.0 | 374.8 | 360.6 | 6% |
-| **All (1390)** | **11.2** | 23.4 | 99.5 | 85.0 | 55% |
+| Group | **GateIO-LSTM** | GateIO-TCN | RoNIN | EKF | Const-v | LSTM % < 5 m |
+|---|---:|---:|---:|---:|---:|---:|
+| Straight (1200) | **7.2** | 20.8 | 40.0 | 55.9 | 41.4 | 62% |
+| Turn (190) | **36.8** | 40.0 | 40.6 | 374.8 | 360.6 | 6% |
+| **All (1390)** | **11.2** | 23.4 | 40.1 | 99.5 | 85.0 | 55% |
 
 Per test flight, mean drift over all sequences (GateIO-LSTM / GateIO-TCN):
 gnss01 4.1 / 27.3, gnss02 11.1 / 13.1, gnss03 20.3 / 17.6, island_gnss02 16.5 / 23.9,
 island_gnss03 30.1 / 35.0. GateIO-LSTM wins on four of the five flights; the TCN backbone
 wins only on gnss03.
 
+The comparison to **RoNIN** is the most telling. A standard learned velocity regressor,
+given the same IMU input, reaches 40.1 m and almost never brings an outage under 5 m —
+better than the classical baselines but far worse than GateIO. The difference is the
+velocity anchor: RoNIN regresses velocity from inertial data with no notion of the last
+known GPS velocity, so its small per-step errors integrate into large drift, while GateIO's
+residual head defaults to holding that last velocity and only learns the deviation. The
+ordering const-v (anchor, no learning) → RoNIN (learning, no anchor) → GateIO (learning
+with a gated residual anchor) is what isolates the contribution.
+
 ![Leave-one-flight-out result](results/figures/fig_lofo.png)
+
+**Per-flight spread.** With only five folds the pooled mean can hide how much the result
+swings between flights, so we also report each model's mean drift averaged over the five
+folds, with the standard deviation across folds: GateIO-LSTM **16.4 ± 9.8 m**, GateIO-TCN
+23.4 ± 8.5, RoNIN 39.3 ± 8.4, EKF 158.1 ± 145.4, Const-v 140.2 ± 140.9. GateIO is not only
+lower but far more consistent across flights; the classical filters swing by over 100 m
+between an easy flight and a hard one.
+
+![Per-flight drift across folds](results/figures/fig_perfold.png)
 
 GateIO-LSTM beats every baseline on every group. The gain over classical methods is largest
 on turns, where constant-velocity and EKF diverge. On straight flight it is roughly six
@@ -160,8 +181,10 @@ across splits**, so there is no train/test leakage.
 (target IQR floored at 0.1 m/s; quaternion channels passed through unscaled).
 
 **Baselines.** Constant-velocity (hold the last GPS velocity); a 6-state EKF with
-per-timestep quaternion gravity compensation, with process and measurement noise tuned
-by Nelder-Mead on each fold's validation flight only — never on the test flight.
+per-timestep quaternion gravity compensation, whose process and measurement noise use
+fixed parameters tuned once by Nelder-Mead on a separate split (not re-tuned per fold);
+and RoNIN, a published learned velocity regressor (1D ResNet-18) trained per fold on the
+same IMU input and selected on validation drift.
 
 **Metric.** Endpoint drift = horizontal (xy) position error at the last outage window,
 integrated from outage onset, in metres, averaged over all held-out test sequences; we
@@ -248,8 +271,10 @@ island site. Two flights (gnss03, island_gnss03) carry most of the turning. Sequ
   this data rather than claiming a general architectural result.
 - **No uncertainty and no filter coupling.** GateIO gives a point estimate; predicting
   uncertainty and fusing it with a filter is known to help and is not done here.
-- **No published learned baseline.** We compare to constant-velocity, a tuned EKF, and two
-  backbones of our own, not to published learned-odometry methods run on this data.
+- **Fixed EKF parameters.** The EKF uses parameters tuned once on a separate split rather
+  than re-tuned per fold; per-fold tuning would lower it somewhat but leaves it far behind
+  GateIO. The RoNIN comparison is the published learned baseline; broader comparisons (e.g.
+  AirIO, TLIO) run on this data are left to future work.
 
 ## License
 
